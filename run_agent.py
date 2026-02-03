@@ -2,18 +2,19 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import json
 import os
+import re
 import subprocess
 from pathlib import Path
-import re
-from functools import partial
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, TypedDict
 
+from langgraph.graph import END, StateGraph
 from qwen_agent.llm import get_chat_model
 import openvino.properties as props
 import openvino.properties.hint as hints
 import openvino.properties.streams as streams
-from tools import register_tools
+from tools import get_langgraph_tools
 from pc_manager_prompt import PC_MANAGER_SYSTEM_PROMPT
 import gc
 import threading
@@ -172,6 +173,163 @@ class _UnloadedLLM:
         )
 
 
+class AgentState(TypedDict):
+    messages: list[dict]
+    tool_request: Optional[dict]
+
+
+def _extract_text(response: Any) -> str:
+    if response is None:
+        return ""
+    if isinstance(response, str):
+        return response
+    if isinstance(response, list):
+        for item in reversed(response):
+            if isinstance(item, dict) and item.get("role") == "assistant":
+                return str(item.get("content", ""))
+        return " ".join(_extract_text(item) for item in response)
+    if isinstance(response, dict):
+        content = response.get("content")
+        if isinstance(content, list):
+            return " ".join(str(x) for x in content)
+        if content is not None:
+            return str(content)
+        return json.dumps(response, ensure_ascii=False)
+    return str(response)
+
+
+def _parse_tool_request(text: str) -> Optional[dict]:
+    match = re.search(
+        r"Action\\s*:\\s*(?P<name>[\\w\\-]+)\\s*Action Input\\s*:\\s*(?P<input>.+)",
+        text,
+        re.S,
+    )
+    if not match:
+        return None
+    name = match.group("name").strip()
+    raw_input = match.group("input").strip()
+    raw_input = raw_input.split("\\nFinal:", 1)[0].strip()
+    raw_input = raw_input.split("\\nObservation:", 1)[0].strip()
+    if raw_input.startswith("```"):
+        raw_input = raw_input.strip("`").strip()
+    try:
+        args = json.loads(raw_input)
+    except json.JSONDecodeError:
+        args = {"input": raw_input}
+    return {"name": name, "args": args}
+
+
+def _build_tool_system_prompt(tools) -> str:
+    tool_lines = [
+        "You can call tools using the following format:",
+        "Action: tool_name",
+        "Action Input: {json}",
+        "",
+    ]
+    tool_lines.append("Available tools:")
+    for tool in tools:
+        description = getattr(tool, "description", "") or ""
+        args = getattr(tool, "args", None)
+        args_json = json.dumps(args, ensure_ascii=False) if args else "{}"
+        tool_lines.append(f"- {tool.name}: {description} Args: {args_json}")
+    tool_lines.append("")
+    tool_lines.append(
+        "When you respond to the user, do NOT include Action/Action Input/Final tags. "
+        "Only output the final user-facing response."
+    )
+    return "\n".join(tool_lines)
+
+
+class LangGraphAgentRunner:
+    def __init__(self, llm, tools, system_prompt: str):
+        self.llm = llm
+        self.tools = tools
+        self.tool_map = {tool.name: tool for tool in tools}
+        self.system_prompt = f"{system_prompt}\n\n{_build_tool_system_prompt(tools)}"
+        self._graph = self._build_graph()
+
+    def _build_graph(self):
+        graph = StateGraph(AgentState)
+        graph.add_node("assistant", self._assistant_node)
+        graph.add_node("tool", self._tool_node)
+
+        def route(state: AgentState):
+            if state.get("tool_request"):
+                return "tool"
+            return END
+
+        graph.add_conditional_edges("assistant", route, {"tool": "tool", END: END})
+        graph.add_edge("tool", "assistant")
+        graph.set_entry_point("assistant")
+        return graph.compile()
+
+    def _assistant_node(self, state: AgentState):
+        messages = state.get("messages", [])
+        followup = bool(messages and messages[-1].get("role") == "tool")
+        chat_messages = messages
+        if followup:
+            chat_messages = messages + [
+                {
+                    "role": "system",
+                    "content": (
+                        "Use the tool result to answer the user. "
+                        "Do NOT call more tools. "
+                        "Do NOT include Action/Action Input/Final tags."
+                    ),
+                }
+            ]
+        response = self.llm.chat(messages=chat_messages, stream=False)
+        text = _extract_text(response)
+        tool_request = None
+        if not followup:
+            tool_request = _parse_tool_request(text)
+        if tool_request:
+            return {
+                "messages": messages,
+                "tool_request": tool_request,
+            }
+        return {
+            "messages": messages + [{"role": "assistant", "content": text}],
+            "tool_request": None,
+        }
+
+    def _tool_node(self, state: AgentState):
+        tool_request = state.get("tool_request")
+        messages = state.get("messages", [])
+        if not tool_request:
+            return {"messages": messages, "tool_request": None}
+
+        name = tool_request.get("name")
+        args = tool_request.get("args") or {}
+        tool = self.tool_map.get(name)
+        if tool is None:
+            result = json.dumps(
+                {"ok": False, "error": f"unknown tool: {name}"},
+                ensure_ascii=False,
+            )
+        else:
+            try:
+                result = tool.invoke(args)
+            except Exception as exc:
+                result = json.dumps(
+                    {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
+                    ensure_ascii=False,
+                )
+        return {
+            "messages": messages + [{"role": "tool", "content": result, "name": name}],
+            "tool_request": None,
+        }
+
+    def invoke(self, messages: list[dict], recursion_limit: int = 6) -> list[dict]:
+        if not messages or messages[0].get("role") != "system":
+            messages = [{"role": "system", "content": self.system_prompt}] + messages
+        result = self._graph.invoke(
+            {"messages": messages, "tool_request": None},
+            config={"recursion_limit": recursion_limit},
+        )
+        return result["messages"]
+
+
 # ----------------- 统一流水线类：OpenVINOAgentPipeline -----------------
 class OpenVINOAgentPipeline:
     """
@@ -183,8 +341,8 @@ class OpenVINOAgentPipeline:
 
     内部持有：
       - self.llm / self.llm_cfg
-      - self.assistant (Qwen-Agent Assistant)
-      - self.tools (function-calling 工具列表)
+      - self.agent_runner (LangGraph agent)
+      - self.tools (LangGraph tools)
     """
 
     def __init__(
@@ -196,8 +354,6 @@ class OpenVINOAgentPipeline:
         asr_device: str = "CPU", 
         asr_type: str = "sensevoice"
     ) -> None:
-        from qwen_agent.agents import Assistant
-
         self.model_id = model_id
         self.model_dir = Path(model_dir) if model_dir is not None else DEFAULT_OV_DIR
         self.fast_kv = fast_kv
@@ -205,22 +361,12 @@ class OpenVINOAgentPipeline:
 
         self.llm = None
         self.llm_cfg: Optional[Dict[str, Any]] = None
-        self.tools = register_tools()
-
-        try:
-            self.assistant = Assistant(
-                llm=_UnloadedLLM(),
-                function_list=self.tools,
-                name="PC Manager",
-                system_message=PC_MANAGER_SYSTEM_PROMPT,
-            )
-        except TypeError:
-            self.assistant = Assistant(
-                llm=_UnloadedLLM(),
-                function_list=self.tools,
-                name="PC Manager",
-                description=PC_MANAGER_SYSTEM_PROMPT,
-            )
+        self.tools = get_langgraph_tools()
+        self.agent_runner = LangGraphAgentRunner(
+            llm=_UnloadedLLM(),
+            tools=self.tools,
+            system_prompt=PC_MANAGER_SYSTEM_PROMPT,
+        )
 
         # ASR (ai_speech backend)
         self.asr_engine = None
@@ -305,11 +451,8 @@ class OpenVINOAgentPipeline:
             self.llm_cfg = llm_cfg
             self.device = device
 
-            if self.assistant is not None:
-                try:
-                    self.assistant.llm = llm
-                except Exception:
-                    setattr(self.assistant, "llm", llm)
+            if self.agent_runner is not None:
+                self.agent_runner.llm = llm
 
             self.initialized = True
             gc.collect()
@@ -389,15 +532,12 @@ class OpenVINOAgentPipeline:
         释放当前模型资源，并将 Assistant 恢复为占位 LLM。
         """
         with self._lock:
-            llm = self.llm or getattr(self.assistant, "llm", None)
+            llm = self.llm or getattr(self.agent_runner, "llm", None)
             if llm is not None and not isinstance(llm, _UnloadedLLM):
                 self._hard_drop_llm(llm)
 
-            if self.assistant is not None:
-                try:
-                    self.assistant.llm = _UnloadedLLM()
-                except Exception:
-                    setattr(self.assistant, "llm", _UnloadedLLM())
+            if self.agent_runner is not None:
+                self.agent_runner.llm = _UnloadedLLM()
 
             self.llm = None
             self.llm_cfg = None
@@ -660,13 +800,23 @@ class OpenVINOAgentPipeline:
             return self.llm.chat(messages=messages, generate_cfg=generate_cfg)
         return self.llm.chat(messages=messages)
 
+    def run_agent(self, messages: list[dict]) -> list[dict]:
+        """
+        Run the LangGraph agent with the current message history.
+        """
+        if not self.initialized or self.llm is None:
+            raise RuntimeError("LLM is not initialized")
+        if self.agent_runner is None:
+            raise RuntimeError("Agent runner is not initialized")
+        return self.agent_runner.invoke(messages)
+
 
 # ----------------- main：CLI 启动 Gradio UI -----------------
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Function-calling Agent with OpenVINO + Qwen-Agent (OOP wrapper)"
+        description="Function-calling Agent with OpenVINO + LangGraph (OOP wrapper)"
     )
     parser.add_argument(
         "--model-id",
