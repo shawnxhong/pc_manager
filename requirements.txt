@@ -8,6 +8,7 @@ accelerate
 transformers
 langchain
 langchain-community
+langgraph
 wikipedia
 pydantic
 pydantic-core
