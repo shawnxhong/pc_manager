@@ -152,42 +152,18 @@ class AgentGradio:
                 self.pipeline.release()
                 return _format_status(self.pipeline.get_status())
 
-            def _append_user_message(message, history):
+            def _submit_message(message, history):
                 if not message:
                     return "", _messages_to_chatbot(history or []), history
                 history = history or []
-                updated_history = history + [{"role": "user", "content": message}]
-                return "", _messages_to_chatbot(updated_history), updated_history
-
-            def _stream_response(history):
-                history = history or []
+                history = history + [{"role": "user", "content": message}]
                 try:
                     updated = self.pipeline.run_agent(history)
                 except Exception as exc:
-                    updated = history + [{"role": "assistant", "content": f"Error: {exc}"}]
-
-                response_text = ""
-                for msg in reversed(updated):
-                    if msg.get("role") == "assistant":
-                        response_text = msg.get("content", "")
-                        break
-                if not isinstance(response_text, str):
-                    response_text = str(response_text)
-
-                base_pairs = _messages_to_chatbot(history)
-                if history and history[-1].get("role") == "user":
-                    user_text = history[-1].get("content", "")
-                    if base_pairs:
-                        base_pairs = base_pairs[:-1]
-                else:
-                    user_text = ""
-
-                partial = ""
-                for ch in response_text:
-                    partial += ch
-                    yield base_pairs + [(user_text, partial)], history
-
-                yield _messages_to_chatbot(updated), updated
+                    updated = history + [
+                        {"role": "assistant", "content": f"Error: {exc}"}
+                    ]
+                return "", _messages_to_chatbot(updated), updated
 
             def _clear_chat():
                 return [], []
@@ -215,27 +191,15 @@ class AgentGradio:
             release_btn.click(_release_model, outputs=[status], queue=True)
 
             send_btn.click(
-                _append_user_message,
+                _submit_message,
                 inputs=[user_input, state],
                 outputs=[user_input, chat, state],
-                queue=False,
-            )
-            send_btn.then(
-                _stream_response,
-                inputs=[state],
-                outputs=[chat, state],
                 queue=True,
             )
             user_input.submit(
-                _append_user_message,
+                _submit_message,
                 inputs=[user_input, state],
                 outputs=[user_input, chat, state],
-                queue=False,
-            )
-            user_input.then(
-                _stream_response,
-                inputs=[state],
-                outputs=[chat, state],
                 queue=True,
             )
             clear_btn.click(_clear_chat, outputs=[chat, state], queue=False)

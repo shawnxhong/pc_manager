@@ -16,6 +16,7 @@ from pc_manager_tables import MS_SETTINGS_ITEMS, CONTROL_PANEL_ITEMS, SYSTEM_TOO
 
 # 索引落盘目录
 INDEX_DIR = Path(__file__).resolve().parent / ".pc_manager_index"
+_AUDIO_EXECUTOR: ThreadPoolExecutor | None = None
 
 # 全局单例：避免每次 tool call 都重建索引/重载 embedder
 _PC: Optional[PCManager] = None
@@ -46,6 +47,34 @@ def release_rag_resource() -> None:
     import gc
 
     gc.collect()
+
+
+def _com_thread_init():
+    # 这个函数在音频线程启动时仅调用一次
+    from comtypes import CoInitializeEx, COINIT_MULTITHREADED
+
+    try:
+        CoInitializeEx(COINIT_MULTITHREADED)
+    except OSError as e:
+        # -2147417850 = RPC_E_CHANGED_MODE, 已在别的模型初始化，继续用即可
+        if getattr(e, "winerror", None) != -2147417850:
+            raise
+    except Exception:
+        # 尝试最小化初始化
+        from comtypes import CoInitialize
+
+        CoInitialize()
+
+
+def _get_audio_executor():
+    global _AUDIO_EXECUTOR
+    if _AUDIO_EXECUTOR is None:
+        _AUDIO_EXECUTOR = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="AudioCOM",
+            initializer=_com_thread_init,  # 在线程里初始化 COM，一直不 Uninitialize
+        )
+    return _AUDIO_EXECUTOR
 
 
 def _safe_run(name, fn, timeout_s: int):
@@ -166,7 +195,6 @@ def wikipedia(query: str) -> str:
         return json.dumps({"ok": True, "result": str(result)}, ensure_ascii=False)
 
     return _safe_run("wikipedia", _impl, 20)
-
 
 @tool
 def realtime_weather(
