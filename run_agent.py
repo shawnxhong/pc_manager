@@ -215,12 +215,7 @@ def _parse_tool_request(text: str) -> Optional[dict]:
 
 
 def _build_tool_system_prompt(tools) -> str:
-    tool_lines = [
-        "You can call tools using the following format:",
-        "Action: tool_name",
-        "Action Input: {json}",
-        "",
-    ]
+    tool_lines = ["You can call tools using the following format:", "Action: tool_name", "Action Input: {json}", ""]
     tool_lines.append("Available tools:")
     for tool in tools:
         description = getattr(tool, "description", "") or ""
@@ -228,11 +223,9 @@ def _build_tool_system_prompt(tools) -> str:
         args_json = json.dumps(args, ensure_ascii=False) if args else "{}"
         tool_lines.append(f"- {tool.name}: {description} Args: {args_json}")
     tool_lines.append("")
-    tool_lines.append(
-        "When you respond to the user, do NOT include Action/Action Input/Final tags. "
-        "Only output the final user-facing response."
-    )
-    return "\n".join(tool_lines)
+    tool_lines.append("After a tool call, wait for the tool output and then respond with:")
+    tool_lines.append("Final: <your answer>")
+    return "\\n".join(tool_lines)
 
 
 class LangGraphAgentRunner:
@@ -260,32 +253,12 @@ class LangGraphAgentRunner:
 
     def _assistant_node(self, state: AgentState):
         messages = state.get("messages", [])
-        followup = bool(messages and messages[-1].get("role") == "tool")
-        chat_messages = messages
-        if followup:
-            chat_messages = messages + [
-                {
-                    "role": "system",
-                    "content": (
-                        "Use the tool result to answer the user. "
-                        "Do NOT call more tools. "
-                        "Do NOT include Action/Action Input/Final tags."
-                    ),
-                }
-            ]
-        response = self.llm.chat(messages=chat_messages, stream=False)
+        response = self.llm.chat(messages=messages, stream=False)
         text = _extract_text(response)
-        tool_request = None
-        if not followup:
-            tool_request = _parse_tool_request(text)
-        if tool_request:
-            return {
-                "messages": messages,
-                "tool_request": tool_request,
-            }
+        tool_request = _parse_tool_request(text)
         return {
             "messages": messages + [{"role": "assistant", "content": text}],
-            "tool_request": None,
+            "tool_request": tool_request,
         }
 
     def _tool_node(self, state: AgentState):
