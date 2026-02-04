@@ -260,6 +260,62 @@ def _build_tool_system_prompt(tools) -> str:
     return "\n".join(tool_lines)
 
 
+def _likely_pc_action(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    if "weather" in lowered:
+        return False
+    if "wikipedia" in lowered:
+        return False
+    keywords = [
+        "open",
+        "launch",
+        "start",
+        "settings",
+        "control panel",
+        "system",
+        "device manager",
+        "task manager",
+        "volume",
+        "brightness",
+        "display",
+        "audio",
+        "sound",
+        "disk",
+        "storage",
+        "cleanup",
+        "clean up",
+        "network",
+        "wifi",
+        "bluetooth",
+        "update",
+        "security",
+        "printer",
+    ]
+    cjk_keywords = [
+        "打开",
+        "设置",
+        "控制面板",
+        "系统",
+        "设备",
+        "任务管理器",
+        "音量",
+        "亮度",
+        "显示",
+        "声音",
+        "磁盘",
+        "清理",
+        "存储",
+        "网络",
+        "蓝牙",
+        "更新",
+        "安全",
+        "打印",
+    ]
+    return any(key in lowered for key in keywords) or any(key in text for key in cjk_keywords)
+
+
 class LangGraphAgentRunner:
     def __init__(self, llm, tools, system_prompt: str):
         self.llm = llm
@@ -316,6 +372,22 @@ class LangGraphAgentRunner:
         response = self.llm.chat(messages=chat_messages, stream=False)
         text = _extract_text(response)
         tool_request = _parse_tool_request(text)
+        if not tool_request:
+            last_user_index = None
+            for idx in range(len(messages) - 1, -1, -1):
+                if messages[idx].get("role") == "user":
+                    last_user_index = idx
+                    break
+            if last_user_index is not None:
+                has_tool_after_user = any(
+                    msg.get("role") == "tool" for msg in messages[last_user_index + 1 :]
+                )
+                last_user_text = messages[last_user_index].get("content", "")
+                if not has_tool_after_user and _likely_pc_action(last_user_text):
+                    tool_request = {
+                        "name": "pc_manager_open",
+                        "args": {"intent": last_user_text},
+                    }
         logger.info(
             "LLM response parsed. followup=%s tool_request=%s roles=%s",
             followup,
@@ -357,9 +429,26 @@ class LangGraphAgentRunner:
 
         logger.info("Tool %s result=%s", name, result)
 
-        return {"messages": messages + [{"role": "tool", "content": result, "name": name}],
-                "tool_request": None,
+        if name == "pc_manager_search":
+            try:
+                payload = json.loads(result)
+            except Exception:
+                payload = {}
+            target_id = payload.get("target_id")
+            if payload.get("ok") and target_id:
+                return {
+                    "messages": messages
+                    + [{"role": "tool", "content": result, "name": name}],
+                    "tool_request": {
+                        "name": "pc_manager_open",
+                        "args": {"intent": args.get("intent", ""), "target_id": target_id},
+                    },
                 }
+
+        return {
+            "messages": messages + [{"role": "tool", "content": result, "name": name}],
+            "tool_request": None,
+        }
 
     def invoke(self, messages: list[dict], recursion_limit: int = 6) -> list[dict]:
         if not messages or messages[0].get("role") != "system":
