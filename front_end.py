@@ -1,4 +1,6 @@
 import gradio as gr
+import json
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -72,6 +74,8 @@ class AgentGradio:
         llm_choices = getattr(self.pipeline, "llm_choices", []) or []
         default_llm = llm_choices[0] if llm_choices else None
         asr_enabled = bool(getattr(self.pipeline, "asr_runner", None))
+        dump_dir = BASE_DIR / "chat_dumps"
+        dump_dir.mkdir(parents=True, exist_ok=True)
 
         with gr.Blocks(
             title="Agentic PC Manager",
@@ -131,6 +135,8 @@ class AgentGradio:
 
             with gr.Row():
                 clear_btn = gr.Button("Clear")
+                dump_btn = gr.Button("Dump Chat JSON")
+            dump_file = gr.File(label="Chat Dump", interactive=False)
 
             if asr_enabled:
                 audio = gr.Audio(
@@ -190,6 +196,29 @@ class AgentGradio:
             def _clear_chat():
                 return [], []
 
+            def _dump_chat(history: list[dict]) -> str | None:
+                payload = {
+                    "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "messages": history or [],
+                    "debug": {
+                        "status": self.pipeline.get_status(),
+                        "model_dir": str(getattr(self.pipeline, "model_dir", "")),
+                        "llm_config": getattr(self.pipeline, "llm_cfg", None),
+                        "tools": [
+                            getattr(tool, "name", str(tool))
+                            for tool in (getattr(self.pipeline, "tools", None) or [])
+                        ],
+                    },
+                }
+                safe_payload = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+                filename = datetime.utcnow().strftime("chat_dump_%Y%m%d_%H%M%S.json")
+                path = dump_dir / filename
+                path.write_text(
+                    json.dumps(safe_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                return str(path)
+
             def _asr_to_input(wav_path, current_input):
                 asr_runner = getattr(self.pipeline, "asr_runner", None)
                 if not asr_runner or not wav_path:
@@ -225,6 +254,7 @@ class AgentGradio:
                 queue=True,
             )
             clear_btn.click(_clear_chat, outputs=[chat, state], queue=False)
+            dump_btn.click(_dump_chat, inputs=[state], outputs=[dump_file], queue=False)
 
             if audio is not None:
                 audio.change(
