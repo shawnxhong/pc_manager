@@ -282,7 +282,7 @@ class LangGraphAgentRunner:
                     "role": "system",
                     "content": (
                         "Use the tool result to decide the next step. "
-                        "If more tools are needed, call them. "
+                        "If more tools are needed (e.g., ambiguous candidates), call them. "
                         "Otherwise respond to the user without Action/Action Input/Final tags."
                     ),
                 }
@@ -335,8 +335,6 @@ class LangGraphAgentRunner:
             config={"recursion_limit": recursion_limit},
         )
         return result["messages"]
-
-
 
 
 # ----------------- 统一流水线类：OpenVINOAgentPipeline -----------------
