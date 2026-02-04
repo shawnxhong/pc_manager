@@ -281,25 +281,12 @@ class LangGraphAgentRunner:
         followup = bool(messages and messages[-1].get("role") == "tool")
         chat_messages = messages
         if followup:
-            chat_messages = []
-            for msg in messages:
-                if msg.get("role") == "tool":
-                    chat_messages.append(
-                        {
-                            "role": "function",
-                            "name": msg.get("name", "tool"),
-                            "content": msg.get("content", ""),
-                        }
-                    )
-                else:
-                    chat_messages.append(msg)
-        if followup:
-            chat_messages = chat_messages + [
+            chat_messages = messages + [
                 {
                     "role": "system",
                     "content": (
                         "Use the tool result to decide the next step. "
-                        "If more tools are needed, call them. "
+                        "If more tools are needed (e.g., ambiguous candidates), call them. "
                         "Otherwise respond to the user without Action/Action Input/Final tags."
                     ),
                 }
@@ -307,12 +294,6 @@ class LangGraphAgentRunner:
         response = self.llm.chat(messages=chat_messages, stream=False)
         text = _extract_text(response)
         tool_request = _parse_tool_request(text)
-        logger.info(
-            "LLM response parsed. followup=%s tool_request=%s roles=%s",
-            followup,
-            bool(tool_request),
-            [msg.get("role") for msg in chat_messages],
-        )
         if tool_request:
             return {
                 "messages": messages,
@@ -331,7 +312,6 @@ class LangGraphAgentRunner:
 
         name = tool_request.get("name")
         args = tool_request.get("args") or {}
-        logger.info("Invoking tool %s with args=%s", name, args)
         tool = self.tool_map.get(name)
         if tool is None:
             result = json.dumps(
@@ -346,7 +326,6 @@ class LangGraphAgentRunner:
                     {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
                     ensure_ascii=False,
                 )
-        logger.info("Tool %s result=%s", name, result)
         return {
             "messages": messages + [{"role": "tool", "content": result, "name": name}],
             "tool_request": None,
@@ -360,8 +339,6 @@ class LangGraphAgentRunner:
             config={"recursion_limit": recursion_limit},
         )
         return result["messages"]
-
-
 
 
 # ----------------- 统一流水线类：OpenVINOAgentPipeline -----------------
