@@ -212,10 +212,19 @@ def _parse_tool_request(text: str) -> Optional[dict]:
     raw_input = raw_input.split("\\nObservation:", 1)[0].strip()
     if raw_input.startswith("```"):
         raw_input = raw_input.strip("`").strip()
+    if raw_input.endswith(".") and "{" in raw_input and "}" in raw_input:
+        raw_input = raw_input[:-1].strip()
     try:
         args = json.loads(raw_input)
     except json.JSONDecodeError:
-        args = {"input": raw_input}
+        match_json = re.search(r"(\{.*\})", raw_input, re.S)
+        if match_json:
+            try:
+                args = json.loads(match_json.group(1))
+            except json.JSONDecodeError:
+                args = {"input": raw_input}
+        else:
+            args = {"input": raw_input}
     return {"name": name, "args": args}
 
 
