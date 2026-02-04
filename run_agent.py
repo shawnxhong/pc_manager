@@ -3,12 +3,16 @@
 
 import argparse
 import json
+from json import tool
 import os
+from pyexpat.errors import messages
 import re
 import subprocess
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, TypedDict
+
+ 
 
 from langgraph.graph import END, StateGraph
 from qwen_agent.llm import get_chat_model
@@ -19,6 +23,9 @@ from tools import get_langgraph_tools
 from pc_manager_prompt import PC_MANAGER_SYSTEM_PROMPT
 import gc
 import threading
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -279,11 +286,9 @@ class LangGraphAgentRunner:
     def _assistant_node(self, state: AgentState):
         messages = state.get("messages", [])
         followup = bool(messages and messages[-1].get("role") == "tool")
-        chat_messages = messages
-        if followup:
-            chat_messages = []
-            for msg in messages:
-                if msg.get("role") == "tool":
+        chat_messages = []
+        for msg in messages:
+            if msg.get("role") == "tool":
                     chat_messages.append(
                         {
                             "role": "function",
@@ -291,23 +296,19 @@ class LangGraphAgentRunner:
                             "content": msg.get("content", ""),
                         }
                     )
-                else:
+            else:
                     chat_messages.append(msg)
         if followup:
-            followup_instruction = (
-                "Use the tool result to decide the next step. "
-                "If more tools are needed, call them. "
-                "Otherwise respond to the user without Action/Action Input/Final tags."
-            )
-            for msg in chat_messages:
-                if msg.get("role") == "system":
-                    msg["content"] = f"{msg.get('content', '').rstrip()}\n{followup_instruction}"
-                    break
-            else:
-                chat_messages = [
-                    {"role": "system", "content": followup_instruction},
-                    *chat_messages,
-                ]
+            chat_messages = chat_messages + [
+                {
+                    "role": "system",
+                    "content": (
+                        "Use the tool result to decide the next step. "
+                        "If more tools are needed (e.g., ambiguous candidates), call them. "
+                        "Otherwise respond to the user without Action/Action Input/Final tags."
+                    ),
+                }
+            ]
         response = self.llm.chat(messages=chat_messages, stream=False)
         text = _extract_text(response)
         tool_request = _parse_tool_request(text)
@@ -332,14 +333,13 @@ class LangGraphAgentRunner:
         messages = state.get("messages", [])
         if not tool_request:
             return {"messages": messages, "tool_request": None}
-
         name = tool_request.get("name")
         args = tool_request.get("args") or {}
         logger.info("Invoking tool %s with args=%s", name, args)
         tool = self.tool_map.get(name)
         if tool is None:
             result = json.dumps(
-                {"ok": False, "error": f"unknown tool: {name}"},
+                {"ok": False, "error": f"unknown tool: {os.name}"},
                 ensure_ascii=False,
             )
         else:
@@ -350,11 +350,12 @@ class LangGraphAgentRunner:
                     {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
                     ensure_ascii=False,
                 )
+
         logger.info("Tool %s result=%s", name, result)
-        return {
-            "messages": messages + [{"role": "tool", "content": result, "name": name}],
-            "tool_request": None,
-        }
+
+        return {"messages": messages + [{"role": "tool", "content": result, "name": name}],
+                "tool_request": None,
+                }
 
     def invoke(self, messages: list[dict], recursion_limit: int = 6) -> list[dict]:
         if not messages or messages[0].get("role") != "system":
@@ -364,8 +365,6 @@ class LangGraphAgentRunner:
             config={"recursion_limit": recursion_limit},
         )
         return result["messages"]
-
-
 
 
 # ----------------- 统一流水线类：OpenVINOAgentPipeline -----------------
