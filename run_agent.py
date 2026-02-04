@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, TypedDict
 
@@ -18,6 +19,9 @@ from tools import get_langgraph_tools
 from pc_manager_prompt import PC_MANAGER_SYSTEM_PROMPT
 import gc
 import threading
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ----------------- 常量：脚本目录 & 默认模型目录 -----------------
 
