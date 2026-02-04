@@ -27,6 +27,9 @@ import threading
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # ----------------- 常量：脚本目录 & 默认模型目录 -----------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
