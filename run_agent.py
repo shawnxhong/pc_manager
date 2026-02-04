@@ -3,12 +3,16 @@
 
 import argparse
 import json
+from json import tool
 import os
+from pyexpat.errors import messages
 import re
 import subprocess
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, TypedDict
+
+ 
 
 from langgraph.graph import END, StateGraph
 from qwen_agent.llm import get_chat_model
@@ -279,9 +283,20 @@ class LangGraphAgentRunner:
     def _assistant_node(self, state: AgentState):
         messages = state.get("messages", [])
         followup = bool(messages and messages[-1].get("role") == "tool")
-        chat_messages = messages
+        chat_messages = []
+        for msg in messages:
+            if msg.get("role") == "tool":
+                    chat_messages.append(
+                        {
+                            "role": "function",
+                            "name": msg.get("name", "tool"),
+                            "content": msg.get("content", ""),
+                        }
+                    )
+            else:
+                    chat_messages.append(msg)
         if followup:
-            chat_messages = messages + [
+            chat_messages = chat_messages + [
                 {
                     "role": "system",
                     "content": (
@@ -294,6 +309,12 @@ class LangGraphAgentRunner:
         response = self.llm.chat(messages=chat_messages, stream=False)
         text = _extract_text(response)
         tool_request = _parse_tool_request(text)
+        logger.info(
+            "LLM response parsed. followup=%s tool_request=%s roles=%s",
+            followup,
+            bool(tool_request),
+            [msg.get("role") for msg in chat_messages],
+        )
         if tool_request:
             return {
                 "messages": messages,
@@ -309,13 +330,13 @@ class LangGraphAgentRunner:
         messages = state.get("messages", [])
         if not tool_request:
             return {"messages": messages, "tool_request": None}
-
         name = tool_request.get("name")
         args = tool_request.get("args") or {}
+        logger.info("Invoking tool %s with args=%s", name, args)
         tool = self.tool_map.get(name)
         if tool is None:
             result = json.dumps(
-                {"ok": False, "error": f"unknown tool: {name}"},
+                {"ok": False, "error": f"unknown tool: {os.name}"},
                 ensure_ascii=False,
             )
         else:
@@ -326,10 +347,12 @@ class LangGraphAgentRunner:
                     {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
                     ensure_ascii=False,
                 )
-        return {
-            "messages": messages + [{"role": "tool", "content": result, "name": name}],
-            "tool_request": None,
-        }
+
+        logger.info("Tool %s result=%s", name, result)
+
+        return {"messages": messages + [{"role": "tool", "content": result, "name": name}],
+                "tool_request": None,
+                }
 
     def invoke(self, messages: list[dict], recursion_limit: int = 6) -> list[dict]:
         if not messages or messages[0].get("role") != "system":
