@@ -157,13 +157,35 @@ class AgentGradio:
                     return "", _messages_to_chatbot(history or []), history
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
+                yield "", _messages_to_chatbot(history), history
                 try:
                     updated = self.pipeline.run_agent(history)
                 except Exception as exc:
                     updated = history + [
                         {"role": "assistant", "content": f"Error: {exc}"}
                     ]
-                return "", _messages_to_chatbot(updated), updated
+
+                assistant_index = None
+                for idx in range(len(updated) - 1, -1, -1):
+                    if updated[idx].get("role") == "assistant":
+                        assistant_index = idx
+                        break
+
+                if assistant_index is None:
+                    yield "", _messages_to_chatbot(updated), updated
+                    return
+
+                full_text = str(updated[assistant_index].get("content", ""))
+                partial = ""
+                for ch in full_text:
+                    partial += ch
+                    streamed = list(updated)
+                    streamed[assistant_index] = {
+                        **updated[assistant_index],
+                        "content": partial,
+                    }
+                    yield "", _messages_to_chatbot(streamed), streamed
+                yield "", _messages_to_chatbot(updated), updated
 
             def _clear_chat():
                 return [], []
