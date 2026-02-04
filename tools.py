@@ -158,29 +158,6 @@ def image_generation(prompt: str) -> str:
 
 
 @tool
-def get_current_weather(city_name: str) -> str:
-    """Get the current weather in a given city name."""
-
-    def _impl():
-        key_selection = {
-            "current_condition": [
-                "temp_C",
-                "FeelsLikeC",
-                "humidity",
-                "weatherDesc",
-                "observation_time",
-            ]
-        }
-        resp = requests.get(f"https://wttr.in/{city_name}?format=j1", timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        ret = {k: {_v: data[k][0][_v] for _v in v} for k, v in key_selection.items()}
-        return json.dumps({"ok": True, "data": ret}, ensure_ascii=False)
-
-    return _safe_run("get_current_weather", _impl, 20)
-
-
-@tool
 def wikipedia(query: str) -> str:
     """A wrapper around Wikipedia. Useful for general facts."""
 
@@ -209,11 +186,27 @@ def realtime_weather(
     - If 'city' is provided: uses wttr.in (no API key).
     - If 'lat' and 'lon' are provided: uses Open-Meteo (no API key).
     Fields are normalized to a common schema.
+    lang: optional response language hint (e.g. "en", "zh").
     """
 
     city = (city or "").strip()
     unit = (unit or "celsius").lower()
     lang = (lang or "").lower()
+
+    def _detect_cjk(text: str) -> bool:
+        return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+    def _normalize_lang(value: str) -> str:
+        value = (value or "").lower().strip()
+        if value.startswith("zh"):
+            return "zh"
+        if value.startswith("en"):
+            return "en"
+        return value
+
+    if not lang and city and _detect_cjk(city):
+        lang = "zh"
+    lang = _normalize_lang(lang)
 
     def _ok(payload):
         return json.dumps({"ok": True, **payload}, ensure_ascii=False)
@@ -226,6 +219,8 @@ def realtime_weather(
         try:
             enc_city = urllib.parse.quote(city)
             url = f"https://wttr.in/{enc_city}?format=j1"
+            if lang:
+                url = f"{url}&lang={urllib.parse.quote(lang)}"
             headers = {"User-Agent": "agentic-weather/1.0"}
             resp = requests.get(url, headers=headers, timeout=8)
             resp.raise_for_status()
@@ -286,6 +281,7 @@ def realtime_weather(
                     "observation_time": cc.get("observation_time"),
                     "unit": temp_unit,
                 },
+                "language": lang or None,
             }
             return _ok(payload)
         except Exception as e:
@@ -337,7 +333,6 @@ def get_langgraph_tools():
         pc_manager_search,
         pc_manager_open,
         image_generation,
-        get_current_weather,
         wikipedia,
         realtime_weather,
     ]
