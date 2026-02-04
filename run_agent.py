@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, TypedDict
 
@@ -18,6 +19,9 @@ from tools import get_langgraph_tools
 from pc_manager_prompt import PC_MANAGER_SYSTEM_PROMPT
 import gc
 import threading
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ----------------- 常量：脚本目录 & 默认模型目录 -----------------
 
@@ -200,7 +204,7 @@ def _extract_text(response: Any) -> str:
 
 def _parse_tool_request(text: str) -> Optional[dict]:
     match = re.search(
-        r"Action\\s*:\\s*(?P<name>[\\w\\-]+)\\s*Action Input\\s*:\\s*(?P<input>.+)",
+        r"Action\s*:\s*(?P<name>[\w\-]+)\s*Action Input\s*:\s*(?P<input>.+)",
         text,
         re.S,
     )
@@ -212,10 +216,19 @@ def _parse_tool_request(text: str) -> Optional[dict]:
     raw_input = raw_input.split("\\nObservation:", 1)[0].strip()
     if raw_input.startswith("```"):
         raw_input = raw_input.strip("`").strip()
+    if raw_input.endswith(".") and "{" in raw_input and "}" in raw_input:
+        raw_input = raw_input[:-1].strip()
     try:
         args = json.loads(raw_input)
     except json.JSONDecodeError:
-        args = {"input": raw_input}
+        match_json = re.search(r"(\{.*\})", raw_input, re.S)
+        if match_json:
+            try:
+                args = json.loads(match_json.group(1))
+            except json.JSONDecodeError:
+                args = {"input": raw_input}
+        else:
+            args = {"input": raw_input}
     return {"name": name, "args": args}
 
 
@@ -268,21 +281,42 @@ class LangGraphAgentRunner:
         followup = bool(messages and messages[-1].get("role") == "tool")
         chat_messages = messages
         if followup:
-            chat_messages = messages + [
-                {
-                    "role": "system",
-                    "content": (
-                        "Use the tool result to answer the user. "
-                        "Do NOT call more tools. "
-                        "Do NOT include Action/Action Input/Final tags."
-                    ),
-                }
-            ]
+            chat_messages = []
+            for msg in messages:
+                if msg.get("role") == "tool":
+                    chat_messages.append(
+                        {
+                            "role": "function",
+                            "name": msg.get("name", "tool"),
+                            "content": msg.get("content", ""),
+                        }
+                    )
+                else:
+                    chat_messages.append(msg)
+        if followup:
+            followup_instruction = (
+                "Use the tool result to decide the next step. "
+                "If more tools are needed, call them. "
+                "Otherwise respond to the user without Action/Action Input/Final tags."
+            )
+            for msg in chat_messages:
+                if msg.get("role") == "system":
+                    msg["content"] = f"{msg.get('content', '').rstrip()}\n{followup_instruction}"
+                    break
+            else:
+                chat_messages = [
+                    {"role": "system", "content": followup_instruction},
+                    *chat_messages,
+                ]
         response = self.llm.chat(messages=chat_messages, stream=False)
         text = _extract_text(response)
-        tool_request = None
-        if not followup:
-            tool_request = _parse_tool_request(text)
+        tool_request = _parse_tool_request(text)
+        logger.info(
+            "LLM response parsed. followup=%s tool_request=%s roles=%s",
+            followup,
+            bool(tool_request),
+            [msg.get("role") for msg in chat_messages],
+        )
         if tool_request:
             return {
                 "messages": messages,
@@ -301,6 +335,7 @@ class LangGraphAgentRunner:
 
         name = tool_request.get("name")
         args = tool_request.get("args") or {}
+        logger.info("Invoking tool %s with args=%s", name, args)
         tool = self.tool_map.get(name)
         if tool is None:
             result = json.dumps(
@@ -315,6 +350,7 @@ class LangGraphAgentRunner:
                     {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
                     ensure_ascii=False,
                 )
+        logger.info("Tool %s result=%s", name, result)
         return {
             "messages": messages + [{"role": "tool", "content": result, "name": name}],
             "tool_request": None,
@@ -330,129 +366,6 @@ class LangGraphAgentRunner:
         return result["messages"]
 
 
-class AgentState(TypedDict):
-    messages: list[dict]
-    tool_request: Optional[dict]
-
-
-def _extract_text(response: Any) -> str:
-    if response is None:
-        return ""
-    if isinstance(response, str):
-        return response
-    if isinstance(response, dict):
-        content = response.get("content")
-        if isinstance(content, list):
-            return " ".join(str(x) for x in content)
-        if content is not None:
-            return str(content)
-        return json.dumps(response, ensure_ascii=False)
-    return str(response)
-
-
-def _parse_tool_request(text: str) -> Optional[dict]:
-    match = re.search(
-        r"Action\\s*:\\s*(?P<name>[\\w\\-]+)\\s*Action Input\\s*:\\s*(?P<input>.+)",
-        text,
-        re.S,
-    )
-    if not match:
-        return None
-    name = match.group("name").strip()
-    raw_input = match.group("input").strip()
-    raw_input = raw_input.split("\\nFinal:", 1)[0].strip()
-    raw_input = raw_input.split("\\nObservation:", 1)[0].strip()
-    if raw_input.startswith("```"):
-        raw_input = raw_input.strip("`").strip()
-    try:
-        args = json.loads(raw_input)
-    except json.JSONDecodeError:
-        args = {"input": raw_input}
-    return {"name": name, "args": args}
-
-
-def _build_tool_system_prompt(tools) -> str:
-    tool_lines = ["You can call tools using the following format:", "Action: tool_name", "Action Input: {json}", ""]
-    tool_lines.append("Available tools:")
-    for tool in tools:
-        description = getattr(tool, "description", "") or ""
-        args = getattr(tool, "args", None)
-        args_json = json.dumps(args, ensure_ascii=False) if args else "{}"
-        tool_lines.append(f"- {tool.name}: {description} Args: {args_json}")
-    tool_lines.append("")
-    tool_lines.append("After a tool call, wait for the tool output and then respond with:")
-    tool_lines.append("Final: <your answer>")
-    return "\\n".join(tool_lines)
-
-
-class LangGraphAgentRunner:
-    def __init__(self, llm, tools, system_prompt: str):
-        self.llm = llm
-        self.tools = tools
-        self.tool_map = {tool.name: tool for tool in tools}
-        self.system_prompt = f"{system_prompt}\n\n{_build_tool_system_prompt(tools)}"
-        self._graph = self._build_graph()
-
-    def _build_graph(self):
-        graph = StateGraph(AgentState)
-        graph.add_node("assistant", self._assistant_node)
-        graph.add_node("tool", self._tool_node)
-
-        def route(state: AgentState):
-            if state.get("tool_request"):
-                return "tool"
-            return END
-
-        graph.add_conditional_edges("assistant", route, {"tool": "tool", END: END})
-        graph.add_edge("tool", "assistant")
-        graph.set_entry_point("assistant")
-        return graph.compile()
-
-    def _assistant_node(self, state: AgentState):
-        messages = state.get("messages", [])
-        response = self.llm.chat(messages=messages, stream=False)
-        text = _extract_text(response)
-        tool_request = _parse_tool_request(text)
-        return {
-            "messages": messages + [{"role": "assistant", "content": text}],
-            "tool_request": tool_request,
-        }
-
-    def _tool_node(self, state: AgentState):
-        tool_request = state.get("tool_request")
-        messages = state.get("messages", [])
-        if not tool_request:
-            return {"messages": messages, "tool_request": None}
-
-        name = tool_request.get("name")
-        args = tool_request.get("args") or {}
-        tool = self.tool_map.get(name)
-        if tool is None:
-            result = json.dumps(
-                {"ok": False, "error": f"unknown tool: {name}"},
-                ensure_ascii=False,
-            )
-        else:
-            try:
-                result = tool.invoke(args)
-            except Exception as exc:
-                result = json.dumps(
-                    {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
-                    ensure_ascii=False,
-                )
-        return {
-            "messages": messages + [{"role": "tool", "content": result, "name": name}],
-            "tool_request": None,
-        }
-
-    def invoke(self, messages: list[dict], recursion_limit: int = 6) -> list[dict]:
-        if not messages or messages[0].get("role") != "system":
-            messages = [{"role": "system", "content": self.system_prompt}] + messages
-        result = self._graph.invoke(
-            {"messages": messages, "tool_request": None},
-            config={"recursion_limit": recursion_limit},
-        )
-        return result["messages"]
 
 
 # ----------------- 统一流水线类：OpenVINOAgentPipeline -----------------
