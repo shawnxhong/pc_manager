@@ -200,7 +200,7 @@ def _extract_text(response: Any) -> str:
 
 def _parse_tool_request(text: str) -> Optional[dict]:
     match = re.search(
-        r"Action\\s*:\\s*(?P<name>[\\w\\-]+)\\s*Action Input\\s*:\\s*(?P<input>.+)",
+        r"Action\s*:\s*(?P<name>[\w\-]+)\s*Action Input\s*:\s*(?P<input>.+)",
         text,
         re.S,
     )
