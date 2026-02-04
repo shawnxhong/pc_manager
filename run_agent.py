@@ -299,16 +299,20 @@ class LangGraphAgentRunner:
             else:
                     chat_messages.append(msg)
         if followup:
-            chat_messages = chat_messages + [
-                {
-                    "role": "system",
-                    "content": (
-                        "Use the tool result to decide the next step. "
-                        "If more tools are needed (e.g., ambiguous candidates), call them. "
-                        "Otherwise respond to the user without Action/Action Input/Final tags."
-                    ),
-                }
-            ]
+            followup_instruction = (
+                "Use the tool result to decide the next step. "
+                "If more tools are needed, call them. "
+                "Otherwise respond to the user without Action/Action Input/Final tags."
+            )
+        for msg in chat_messages:
+            if msg.get("role") == "system":
+                    msg["content"] = f"{msg.get('content', '').rstrip()}\n{followup_instruction}"
+                    break
+            else:
+                chat_messages = [
+                    {"role": "system", "content": followup_instruction},
+                    *chat_messages,
+                ]
         response = self.llm.chat(messages=chat_messages, stream=False)
         text = _extract_text(response)
         tool_request = _parse_tool_request(text)
