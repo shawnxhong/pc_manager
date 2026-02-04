@@ -304,8 +304,8 @@ class LangGraphAgentRunner:
                 "If more tools are needed, call them. "
                 "Otherwise respond to the user without Action/Action Input/Final tags."
             )
-        for msg in chat_messages:
-            if msg.get("role") == "system":
+            for msg in chat_messages:
+                if msg.get("role") == "system":
                     msg["content"] = f"{msg.get('content', '').rstrip()}\n{followup_instruction}"
                     break
             else:
