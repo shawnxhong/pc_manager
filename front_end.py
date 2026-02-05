@@ -163,7 +163,7 @@ class AgentGradio:
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
                 pending = history + [
-                    {"role": "assistant", "content": "", "metadata": {"status": "pending"}}
+                    {"role": "assistant", "content": None, "metadata": {"status": "pending"}}
                 ]
                 yield "", _messages_to_chatbot(pending), history
                 try:
