@@ -15,10 +15,10 @@ from typing import Dict, Any, Optional, TypedDict
  
 
 from langgraph.graph import END, StateGraph
-from qwen_agent.llm import get_chat_model
 import openvino.properties as props
 import openvino.properties.hint as hints
 import openvino.properties.streams as streams
+import openvino.genai as ov_genai
 from tools import get_langgraph_tools
 from pc_manager_prompt import PC_MANAGER_SYSTEM_PROMPT
 import gc
@@ -103,9 +103,48 @@ def build_llm_cfg(model_path: Path, device: str, fast_kv: bool):
     return llm_cfg
 
 
+def _messages_to_prompt(messages: list[dict]) -> str:
+    lines = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role == "system":
+            lines.append(f"System: {content}")
+        elif role == "user":
+            lines.append(f"User: {content}")
+        elif role == "assistant":
+            lines.append(f"Assistant: {content}")
+        elif role == "function":
+            name = msg.get("name", "tool")
+            lines.append(f"Tool[{name}]: {content}")
+        else:
+            lines.append(f"{role}: {content}")
+    lines.append("Assistant:")
+    return "\n".join(lines)
+
+
+class OpenVINOChatModel:
+    def __init__(self, model_path: Path, device: str, ov_config: dict, generate_cfg: dict):
+        self.pipeline = ov_genai.LLMPipeline(str(model_path), device, **ov_config)
+        self.generate_cfg = generate_cfg or {}
+
+    def chat(self, messages, stream: bool = False, generate_cfg: Optional[dict] = None):
+        prompt = _messages_to_prompt(messages)
+        cfg = {**self.generate_cfg, **(generate_cfg or {})}
+        result = self.pipeline.generate(prompt, **cfg)
+        if isinstance(result, str):
+            return result
+        return getattr(result, "text", None) or str(result)
+
+
 def build_llm(model_path: Path, device: str, fast_kv: bool):
     llm_cfg = build_llm_cfg(model_path, device, fast_kv)
-    llm = get_chat_model(llm_cfg)
+    llm = OpenVINOChatModel(
+        model_path=Path(llm_cfg["ov_model_dir"]),
+        device=llm_cfg["device"],
+        ov_config=llm_cfg["ov_config"],
+        generate_cfg=llm_cfg.get("generate_cfg", {}),
+    )
     return llm, llm_cfg
 
 
