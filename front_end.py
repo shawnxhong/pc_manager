@@ -124,7 +124,12 @@ class AgentGradio:
                 height=720,
                 show_copy_button=True,
             )
-            working_status = gr.Markdown(value="")
+            working_status = gr.Textbox(
+                label="Status",
+                value="",
+                interactive=False,
+                visible=True,
+            )
 
             with gr.Row():
                 user_input = gr.Textbox(
@@ -159,11 +164,12 @@ class AgentGradio:
                 self.pipeline.release()
                 return _format_status(self.pipeline.get_status())
 
-            def _submit_message(message, history):
+            def _submit_message(message, history, progress=gr.Progress(track_tqdm=False)):
                 if not message:
                     return "", _messages_to_chatbot(history or []), history, gr.update(value="")
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
+                progress(0, desc="Working...")
                 yield "", _messages_to_chatbot(history), history, gr.update(value="Working...")
                 try:
                     updated = self.pipeline.run_agent(history)
@@ -191,7 +197,9 @@ class AgentGradio:
                         **updated[assistant_index],
                         "content": partial,
                     }
+                    progress(0.5, desc="Working...")
                     yield "", _messages_to_chatbot(streamed), streamed, gr.update(value="Working...")
+                progress(1, desc="Done")
                 yield "", _messages_to_chatbot(updated), updated, gr.update(value="")
 
             def _clear_chat():
