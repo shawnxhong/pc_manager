@@ -96,6 +96,18 @@ class AgentGradio:
             footer {
                 display: none !important;
             }
+            .loading-dots span {
+                animation: loading-bounce 1.2s infinite ease-in-out;
+                display: inline-block;
+                font-weight: 600;
+            }
+            .loading-dots span:nth-child(1) { animation-delay: 0s; }
+            .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+            .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+            @keyframes loading-bounce {
+                0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+                40% { transform: translateY(-4px); opacity: 1; }
+            }
             """,
         ) as demo:
             state = gr.State([])
@@ -162,7 +174,12 @@ class AgentGradio:
                     return "", _messages_to_chatbot(history or []), history
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
-                pending = history + [{"role": "assistant", "content": "…"}]
+                loading_html = (
+                    '<span class="loading-dots" aria-label="Loading">'
+                    "<span>.</span><span>.</span><span>.</span>"
+                    "</span>"
+                )
+                pending = history + [{"role": "assistant", "content": loading_html}]
                 yield "", _messages_to_chatbot(pending), history
                 try:
                     updated = self.pipeline.run_agent(history)
