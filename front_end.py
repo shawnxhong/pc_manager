@@ -1,5 +1,7 @@
 import gradio as gr
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -163,12 +165,18 @@ class AgentGradio:
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
                 yield "", _messages_to_chatbot(history, pending=True), history
-                try:
-                    updated = self.pipeline.run_agent(history)
-                except Exception as exc:
-                    updated = history + [
-                        {"role": "assistant", "content": f"Error: {exc}"}
-                    ]
+                updated = None
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(self.pipeline.run_agent, history)
+                    while not future.done():
+                        yield "", _messages_to_chatbot(history, pending=True), history
+                        time.sleep(0.2)
+                    try:
+                        updated = future.result()
+                    except Exception as exc:
+                        updated = history + [
+                            {"role": "assistant", "content": f"Error: {exc}"}
+                        ]
 
                 assistant_index = None
                 for idx in range(len(updated) - 1, -1, -1):
@@ -179,6 +187,16 @@ class AgentGradio:
                 if assistant_index is None:
                     yield "", _messages_to_chatbot(updated), updated
                     return
+                full_text = str(updated[assistant_index].get("content", ""))
+                partial = ""
+                for ch in full_text:
+                    partial += ch
+                    streamed = list(updated)
+                    streamed[assistant_index] = {
+                        **updated[assistant_index],
+                        "content": partial,
+                    }
+                    yield "", _messages_to_chatbot(streamed), streamed
                 yield "", _messages_to_chatbot(updated), updated
 
             def _clear_chat():
