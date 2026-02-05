@@ -279,6 +279,8 @@ def _likely_pc_action(text: str) -> bool:
         "task manager",
         "volume",
         "brightness",
+        "screen",
+        "dark",
         "display",
         "audio",
         "sound",
@@ -372,6 +374,36 @@ class LangGraphAgentRunner:
         response = self.llm.chat(messages=chat_messages, stream=False)
         text = _extract_text(response)
         tool_request = _parse_tool_request(text)
+        if not tool_request and followup and messages:
+            last_tool = messages[-1]
+            tool_name = last_tool.get("name")
+            if tool_name in {"pc_manager_search", "pc_manager_open"}:
+                try:
+                    tool_payload = json.loads(last_tool.get("content", ""))
+                except Exception:
+                    tool_payload = {}
+            else:
+                tool_payload = {}
+
+            if tool_name == "pc_manager_search" and tool_payload.get("ok"):
+                target_id = tool_payload.get("target_id")
+                if target_id:
+                    tool_request = {
+                        "name": "pc_manager_open",
+                        "args": {
+                            "intent": tool_payload.get("intent", ""),
+                            "target_id": target_id,
+                        },
+                    }
+
+            if tool_name == "pc_manager_open" and not tool_payload.get("ok"):
+                error_msg = str(tool_payload.get("error", "")).lower()
+                if "unknown target_id" in error_msg:
+                    tool_request = {
+                        "name": "pc_manager_search",
+                        "args": {"intent": tool_payload.get("intent", "")},
+                    }
+
         if not tool_request:
             last_user_index = None
             for idx in range(len(messages) - 1, -1, -1):
@@ -428,22 +460,6 @@ class LangGraphAgentRunner:
                 )
 
         logger.info("Tool %s result=%s", name, result)
-
-        if name == "pc_manager_search":
-            try:
-                payload = json.loads(result)
-            except Exception:
-                payload = {}
-            target_id = payload.get("target_id")
-            if payload.get("ok") and target_id:
-                return {
-                    "messages": messages
-                    + [{"role": "tool", "content": result, "name": name}],
-                    "tool_request": {
-                        "name": "pc_manager_open",
-                        "args": {"intent": args.get("intent", ""), "target_id": target_id},
-                    },
-                }
 
         return {
             "messages": messages + [{"role": "tool", "content": result, "name": name}],
