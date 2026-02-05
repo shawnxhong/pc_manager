@@ -18,7 +18,7 @@ from langgraph.graph import END, StateGraph
 import openvino.properties as props
 import openvino.properties.hint as hints
 import openvino.properties.streams as streams
-import openvino.genai as ov_genai
+import openvino_genai as ov_genai
 from tools import get_langgraph_tools
 from pc_manager_prompt import PC_MANAGER_SYSTEM_PROMPT
 import gc
