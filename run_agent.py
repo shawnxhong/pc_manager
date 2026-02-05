@@ -458,6 +458,15 @@ class LangGraphAgentRunner:
         response = self.llm.chat(messages=chat_messages, stream=False)
         text = _extract_text(response)
         tool_request = _parse_tool_request(text)
+        if tool_request:
+            if tool_request.get("name") == "pc_manager_open":
+                args = tool_request.get("args") or {}
+                target_id = args.get("target_id")
+                if not target_id:
+                    tool_request = {
+                        "name": "pc_manager_search",
+                        "args": {"intent": args.get("intent") or args.get("input") or ""},
+                    }
         if not tool_request and followup and messages:
             last_tool = messages[-1]
             tool_name = last_tool.get("name")
@@ -504,7 +513,7 @@ class LangGraphAgentRunner:
                         self.llm, last_user_text
                     ):
                         tool_request = {
-                            "name": "pc_manager_open",
+                            "name": "pc_manager_search",
                             "args": {"intent": last_user_text},
                         }
         logger.info(
