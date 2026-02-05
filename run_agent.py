@@ -15,10 +15,10 @@ from typing import Dict, Any, Optional, TypedDict
  
 
 from langgraph.graph import END, StateGraph
-from qwen_agent.llm import get_chat_model
 import openvino.properties as props
 import openvino.properties.hint as hints
 import openvino.properties.streams as streams
+import openvino_genai as ov_genai
 from tools import get_langgraph_tools
 from pc_manager_prompt import PC_MANAGER_SYSTEM_PROMPT
 import gc
@@ -103,9 +103,48 @@ def build_llm_cfg(model_path: Path, device: str, fast_kv: bool):
     return llm_cfg
 
 
+def _messages_to_prompt(messages: list[dict]) -> str:
+    lines = []
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role == "system":
+            lines.append(f"System: {content}")
+        elif role == "user":
+            lines.append(f"User: {content}")
+        elif role == "assistant":
+            lines.append(f"Assistant: {content}")
+        elif role == "function":
+            name = msg.get("name", "tool")
+            lines.append(f"Tool[{name}]: {content}")
+        else:
+            lines.append(f"{role}: {content}")
+    lines.append("Assistant:")
+    return "\n".join(lines)
+
+
+class OpenVINOChatModel:
+    def __init__(self, model_path: Path, device: str, ov_config: dict, generate_cfg: dict):
+        self.pipeline = ov_genai.LLMPipeline(str(model_path), device, **ov_config)
+        self.generate_cfg = generate_cfg or {}
+
+    def chat(self, messages, stream: bool = False, generate_cfg: Optional[dict] = None):
+        prompt = _messages_to_prompt(messages)
+        cfg = {**self.generate_cfg, **(generate_cfg or {})}
+        result = self.pipeline.generate(prompt, **cfg)
+        if isinstance(result, str):
+            return result
+        return getattr(result, "text", None) or str(result)
+
+
 def build_llm(model_path: Path, device: str, fast_kv: bool):
     llm_cfg = build_llm_cfg(model_path, device, fast_kv)
-    llm = get_chat_model(llm_cfg)
+    llm = OpenVINOChatModel(
+        model_path=Path(llm_cfg["ov_model_dir"]),
+        device=llm_cfg["device"],
+        ov_config=llm_cfg["ov_config"],
+        generate_cfg=llm_cfg.get("generate_cfg", {}),
+    )
     return llm, llm_cfg
 
 
@@ -260,6 +299,109 @@ def _build_tool_system_prompt(tools) -> str:
     return "\n".join(tool_lines)
 
 
+def _likely_pc_action(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    if "weather" in lowered:
+        return False
+    if "wikipedia" in lowered:
+        return False
+    keywords = [
+        "open",
+        "launch",
+        "start",
+        "settings",
+        "control panel",
+        "system",
+        "device manager",
+        "task manager",
+        "volume",
+        "brightness",
+        "screen",
+        "dark",
+        "display",
+        "audio",
+        "sound",
+        "disk",
+        "storage",
+        "cleanup",
+        "clean up",
+        "network",
+        "wifi",
+        "bluetooth",
+        "update",
+        "security",
+        "printer",
+    ]
+    cjk_keywords = [
+        "打开",
+        "设置",
+        "控制面板",
+        "系统",
+        "设备",
+        "任务管理器",
+        "音量",
+        "亮度",
+        "显示",
+        "声音",
+        "磁盘",
+        "清理",
+        "存储",
+        "网络",
+        "蓝牙",
+        "更新",
+        "安全",
+        "打印",
+    ]
+    return any(key in lowered for key in keywords) or any(key in text for key in cjk_keywords)
+
+
+def _llm_likely_pc_action(llm, text: str) -> bool:
+    if not text or llm is None:
+        return False
+    classifier_prompt = [
+        {
+            "role": "system",
+            "content": (
+                "You are a classifier for Windows PC management intents. "
+                "Return only JSON with a boolean field `pc_action`."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Decide if this user request likely needs opening a Windows settings, "
+                "control panel, or system tool. Reply only as JSON.\n"
+                f"Request: {text}"
+            ),
+        },
+    ]
+    try:
+        response = llm.chat(messages=classifier_prompt, stream=False)
+        raw = _extract_text(response)
+        parsed = json.loads(raw) if raw else {}
+        return bool(parsed.get("pc_action"))
+    except Exception:
+        return False
+
+
+def _sanitize_pc_manager_args(name: str, args: dict) -> dict:
+    if not isinstance(args, dict):
+        return {}
+    if name not in {"pc_manager_search", "pc_manager_open"}:
+        return args
+    if "intent" not in args and "input" in args:
+        args = {**args, "intent": args.get("input")}
+    intent = args.get("intent")
+    if isinstance(intent, dict):
+        intent = intent.get("title") or intent.get("value")
+        args = {**args, "intent": intent}
+    if not isinstance(args.get("intent"), str):
+        args["intent"] = str(args.get("intent", "")).strip()
+    return args
+
+
 class LangGraphAgentRunner:
     def __init__(self, llm, tools, system_prompt: str):
         self.llm = llm
@@ -304,8 +446,8 @@ class LangGraphAgentRunner:
                 "If more tools are needed, call them. "
                 "Otherwise respond to the user without Action/Action Input/Final tags."
             )
-        for msg in chat_messages:
-            if msg.get("role") == "system":
+            for msg in chat_messages:
+                if msg.get("role") == "system":
                     msg["content"] = f"{msg.get('content', '').rstrip()}\n{followup_instruction}"
                     break
             else:
@@ -316,6 +458,55 @@ class LangGraphAgentRunner:
         response = self.llm.chat(messages=chat_messages, stream=False)
         text = _extract_text(response)
         tool_request = _parse_tool_request(text)
+        if not tool_request and followup and messages:
+            last_tool = messages[-1]
+            tool_name = last_tool.get("name")
+            if tool_name in {"pc_manager_search", "pc_manager_open"}:
+                try:
+                    tool_payload = json.loads(last_tool.get("content", ""))
+                except Exception:
+                    tool_payload = {}
+            else:
+                tool_payload = {}
+
+            if tool_name == "pc_manager_search" and tool_payload.get("ok"):
+                target_id = tool_payload.get("target_id")
+                if target_id:
+                    tool_request = {
+                        "name": "pc_manager_open",
+                        "args": {
+                            "intent": tool_payload.get("intent", ""),
+                            "target_id": target_id,
+                        },
+                    }
+
+            if tool_name == "pc_manager_open" and not tool_payload.get("ok"):
+                error_msg = str(tool_payload.get("error", "")).lower()
+                if "unknown target_id" in error_msg:
+                    tool_request = {
+                        "name": "pc_manager_search",
+                        "args": {"intent": tool_payload.get("intent", "")},
+                    }
+
+        if not tool_request:
+            last_user_index = None
+            for idx in range(len(messages) - 1, -1, -1):
+                if messages[idx].get("role") == "user":
+                    last_user_index = idx
+                    break
+            if last_user_index is not None:
+                has_tool_after_user = any(
+                    msg.get("role") == "tool" for msg in messages[last_user_index + 1 :]
+                )
+                last_user_text = messages[last_user_index].get("content", "")
+                if not has_tool_after_user:
+                    if _likely_pc_action(last_user_text) or _llm_likely_pc_action(
+                        self.llm, last_user_text
+                    ):
+                        tool_request = {
+                            "name": "pc_manager_open",
+                            "args": {"intent": last_user_text},
+                        }
         logger.info(
             "LLM response parsed. followup=%s tool_request=%s roles=%s",
             followup,
@@ -339,6 +530,7 @@ class LangGraphAgentRunner:
             return {"messages": messages, "tool_request": None}
         name = tool_request.get("name")
         args = tool_request.get("args") or {}
+        args = _sanitize_pc_manager_args(name, args)
         logger.info("Invoking tool %s with args=%s", name, args)
         tool = self.tool_map.get(name)
         if tool is None:
@@ -357,9 +549,10 @@ class LangGraphAgentRunner:
 
         logger.info("Tool %s result=%s", name, result)
 
-        return {"messages": messages + [{"role": "tool", "content": result, "name": name}],
-                "tool_request": None,
-                }
+        return {
+            "messages": messages + [{"role": "tool", "content": result, "name": name}],
+            "tool_request": None,
+        }
 
     def invoke(self, messages: list[dict], recursion_limit: int = 6) -> list[dict]:
         if not messages or messages[0].get("role") != "system":
@@ -882,7 +1075,7 @@ def main():
     parser.add_argument(
         "--device",
         default="GPU",
-        choices=["GPU"],
+        choices=["CPU", "GPU"],
         help="推理设备",
     )
     parser.add_argument(
