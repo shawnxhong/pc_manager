@@ -161,10 +161,10 @@ class AgentGradio:
 
             def _submit_message(message, history):
                 if not message:
-                    return "", _messages_to_chatbot(history or []), history, ""
+                    return "", _messages_to_chatbot(history or []), history, gr.update(value="")
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
-                yield "", _messages_to_chatbot(history), history, "Working..."
+                yield "", _messages_to_chatbot(history), history, gr.update(value="Working...")
                 try:
                     updated = self.pipeline.run_agent(history)
                 except Exception as exc:
@@ -179,7 +179,7 @@ class AgentGradio:
                         break
 
                 if assistant_index is None:
-                    yield "", _messages_to_chatbot(updated), updated, ""
+                    yield "", _messages_to_chatbot(updated), updated, gr.update(value="")
                     return
 
                 full_text = str(updated[assistant_index].get("content", ""))
@@ -191,11 +191,11 @@ class AgentGradio:
                         **updated[assistant_index],
                         "content": partial,
                     }
-                    yield "", _messages_to_chatbot(streamed), streamed, "Working..."
-                yield "", _messages_to_chatbot(updated), updated, ""
+                    yield "", _messages_to_chatbot(streamed), streamed, gr.update(value="Working...")
+                yield "", _messages_to_chatbot(updated), updated, gr.update(value="")
 
             def _clear_chat():
-                return [], [], ""
+                return [], [], gr.update(value="")
 
             def _dump_chat(history: list[dict]) -> str | None:
                 payload = {
