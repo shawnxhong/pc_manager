@@ -347,6 +347,22 @@ def _llm_likely_pc_action(llm, text: str) -> bool:
         return False
 
 
+def _sanitize_pc_manager_args(name: str, args: dict) -> dict:
+    if not isinstance(args, dict):
+        return {}
+    if name not in {"pc_manager_search", "pc_manager_open"}:
+        return args
+    if "intent" not in args and "input" in args:
+        args = {**args, "intent": args.get("input")}
+    intent = args.get("intent")
+    if isinstance(intent, dict):
+        intent = intent.get("title") or intent.get("value")
+        args = {**args, "intent": intent}
+    if not isinstance(args.get("intent"), str):
+        args["intent"] = str(args.get("intent", "")).strip()
+    return args
+
+
 class LangGraphAgentRunner:
     def __init__(self, llm, tools, system_prompt: str):
         self.llm = llm
@@ -475,6 +491,7 @@ class LangGraphAgentRunner:
             return {"messages": messages, "tool_request": None}
         name = tool_request.get("name")
         args = tool_request.get("args") or {}
+        args = _sanitize_pc_manager_args(name, args)
         logger.info("Invoking tool %s with args=%s", name, args)
         tool = self.tool_map.get(name)
         if tool is None:
