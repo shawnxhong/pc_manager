@@ -163,7 +163,7 @@ class AgentGradio:
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
                 pending = history + [
-                    {"role": "assistant", "content": None, "metadata": {"status": "pending"}}
+                    {"role": "assistant", "content": "", "metadata": {"status": "pending"}}
                 ]
                 yield "", _messages_to_chatbot(pending), history
                 try:
@@ -182,17 +182,6 @@ class AgentGradio:
                 if assistant_index is None:
                     yield "", _messages_to_chatbot(updated), updated
                     return
-
-                full_text = str(updated[assistant_index].get("content", ""))
-                partial = ""
-                for ch in full_text:
-                    partial += ch
-                    streamed = list(updated)
-                    streamed[assistant_index] = {
-                        **updated[assistant_index],
-                        "content": partial,
-                    }
-                    yield "", _messages_to_chatbot(streamed), streamed
                 yield "", _messages_to_chatbot(updated), updated
 
             def _clear_chat():
