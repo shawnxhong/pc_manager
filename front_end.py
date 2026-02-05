@@ -109,7 +109,7 @@ class AgentGradio:
                 )
                 device = gr.Dropdown(
                     label="Device",
-                    choices=["CPU", "GPU", "NPU"],
+                    choices=["CPU", "GPU"],
                     value="GPU",
                     interactive=True,
                 )

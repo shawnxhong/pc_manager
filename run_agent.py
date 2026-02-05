@@ -1075,7 +1075,7 @@ def main():
     parser.add_argument(
         "--device",
         default="GPU",
-        choices=["CPU", "GPU", "NPU"],
+        choices=["CPU", "GPU"],
         help="推理设备",
     )
     parser.add_argument(
