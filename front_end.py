@@ -124,13 +124,6 @@ class AgentGradio:
                 height=720,
                 show_copy_button=True,
             )
-            working_status = gr.Textbox(
-                label="Status",
-                value="",
-                interactive=False,
-                visible=True,
-            )
-
             with gr.Row():
                 user_input = gr.Textbox(
                     placeholder=chatbot_config["input.placeholder"],
@@ -164,13 +157,13 @@ class AgentGradio:
                 self.pipeline.release()
                 return _format_status(self.pipeline.get_status())
 
-            def _submit_message(message, history, progress=gr.Progress(track_tqdm=False)):
+            def _submit_message(message, history):
                 if not message:
-                    return "", _messages_to_chatbot(history or []), history, gr.update(value="")
+                    return "", _messages_to_chatbot(history or []), history
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
-                progress(0, desc="Working...")
-                yield "", _messages_to_chatbot(history), history, gr.update(value="Working...")
+                pending = history + [{"role": "assistant", "content": "…"}]
+                yield "", _messages_to_chatbot(pending), history
                 try:
                     updated = self.pipeline.run_agent(history)
                 except Exception as exc:
@@ -185,7 +178,7 @@ class AgentGradio:
                         break
 
                 if assistant_index is None:
-                    yield "", _messages_to_chatbot(updated), updated, gr.update(value="")
+                    yield "", _messages_to_chatbot(updated), updated
                     return
 
                 full_text = str(updated[assistant_index].get("content", ""))
@@ -197,13 +190,11 @@ class AgentGradio:
                         **updated[assistant_index],
                         "content": partial,
                     }
-                    progress(0.5, desc="Working...")
-                    yield "", _messages_to_chatbot(streamed), streamed, gr.update(value="Working...")
-                progress(1, desc="Done")
-                yield "", _messages_to_chatbot(updated), updated, gr.update(value="")
+                    yield "", _messages_to_chatbot(streamed), streamed
+                yield "", _messages_to_chatbot(updated), updated
 
             def _clear_chat():
-                return [], [], gr.update(value="")
+                return [], []
 
             def _dump_chat(history: list[dict]) -> str | None:
                 payload = {
@@ -253,16 +244,16 @@ class AgentGradio:
             send_btn.click(
                 _submit_message,
                 inputs=[user_input, state],
-                outputs=[user_input, chat, state, working_status],
+                outputs=[user_input, chat, state],
                 queue=True,
             )
             user_input.submit(
                 _submit_message,
                 inputs=[user_input, state],
-                outputs=[user_input, chat, state, working_status],
+                outputs=[user_input, chat, state],
                 queue=True,
             )
-            clear_btn.click(_clear_chat, outputs=[chat, state, working_status], queue=False)
+            clear_btn.click(_clear_chat, outputs=[chat, state], queue=False)
             dump_btn.click(_dump_chat, inputs=[state], outputs=[dump_file], queue=False)
 
             if audio is not None:
