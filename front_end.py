@@ -24,20 +24,19 @@ def _format_status(status: dict) -> str:
     return f"Model: {status.get('model_id')} | Device: {status.get('device')}"
 
 
-def _messages_to_chatbot(messages: list[dict]) -> list[tuple[str, str]]:
-    chat_pairs = []
-    pending_user = None
+def _messages_to_chatbot(messages: list[dict]) -> list[dict]:
+    chat_messages = []
     for msg in messages:
         role = msg.get("role")
+        if role not in {"user", "assistant"}:
+            continue
         content = msg.get("content", "")
-        if role == "user":
-            pending_user = content
-        elif role == "assistant":
-            chat_pairs.append((pending_user or "", content))
-            pending_user = None
-    if pending_user:
-        chat_pairs.append((pending_user, ""))
-    return chat_pairs
+        payload = {"role": role, "content": content}
+        metadata = msg.get("metadata")
+        if metadata:
+            payload["metadata"] = metadata
+        chat_messages.append(payload)
+    return chat_messages
 
 
 class AgentGradio:
@@ -96,18 +95,6 @@ class AgentGradio:
             footer {
                 display: none !important;
             }
-            .loading-dots span {
-                animation: loading-bounce 1.2s infinite ease-in-out;
-                display: inline-block;
-                font-weight: 600;
-            }
-            .loading-dots span:nth-child(1) { animation-delay: 0s; }
-            .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
-            .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
-            @keyframes loading-bounce {
-                0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
-                40% { transform: translateY(-4px); opacity: 1; }
-            }
             """,
         ) as demo:
             state = gr.State([])
@@ -132,6 +119,7 @@ class AgentGradio:
 
             chat = gr.Chatbot(
                 value=[],
+                type="messages",
                 avatar_images=[user_logo, bot_logo],
                 height=720,
                 show_copy_button=True,
@@ -174,12 +162,9 @@ class AgentGradio:
                     return "", _messages_to_chatbot(history or []), history
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
-                loading_html = (
-                    '<span class="loading-dots" aria-label="Loading">'
-                    "<span>.</span><span>.</span><span>.</span>"
-                    "</span>"
-                )
-                pending = history + [{"role": "assistant", "content": loading_html}]
+                pending = history + [
+                    {"role": "assistant", "content": "", "metadata": {"status": "pending"}}
+                ]
                 yield "", _messages_to_chatbot(pending), history
                 try:
                     updated = self.pipeline.run_agent(history)
