@@ -124,6 +124,7 @@ class AgentGradio:
                 height=720,
                 show_copy_button=True,
             )
+            working_status = gr.Markdown(value="")
 
             with gr.Row():
                 user_input = gr.Textbox(
@@ -160,10 +161,10 @@ class AgentGradio:
 
             def _submit_message(message, history):
                 if not message:
-                    return "", _messages_to_chatbot(history or []), history
+                    return "", _messages_to_chatbot(history or []), history, ""
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
-                yield "", _messages_to_chatbot(history), history
+                yield "", _messages_to_chatbot(history), history, "Working..."
                 try:
                     updated = self.pipeline.run_agent(history)
                 except Exception as exc:
@@ -178,7 +179,7 @@ class AgentGradio:
                         break
 
                 if assistant_index is None:
-                    yield "", _messages_to_chatbot(updated), updated
+                    yield "", _messages_to_chatbot(updated), updated, ""
                     return
 
                 full_text = str(updated[assistant_index].get("content", ""))
@@ -190,11 +191,11 @@ class AgentGradio:
                         **updated[assistant_index],
                         "content": partial,
                     }
-                    yield "", _messages_to_chatbot(streamed), streamed
-                yield "", _messages_to_chatbot(updated), updated
+                    yield "", _messages_to_chatbot(streamed), streamed, "Working..."
+                yield "", _messages_to_chatbot(updated), updated, ""
 
             def _clear_chat():
-                return [], []
+                return [], [], ""
 
             def _dump_chat(history: list[dict]) -> str | None:
                 payload = {
@@ -244,16 +245,16 @@ class AgentGradio:
             send_btn.click(
                 _submit_message,
                 inputs=[user_input, state],
-                outputs=[user_input, chat, state],
+                outputs=[user_input, chat, state, working_status],
                 queue=True,
             )
             user_input.submit(
                 _submit_message,
                 inputs=[user_input, state],
-                outputs=[user_input, chat, state],
+                outputs=[user_input, chat, state, working_status],
                 queue=True,
             )
-            clear_btn.click(_clear_chat, outputs=[chat, state], queue=False)
+            clear_btn.click(_clear_chat, outputs=[chat, state, working_status], queue=False)
             dump_btn.click(_dump_chat, inputs=[state], outputs=[dump_file], queue=False)
 
             if audio is not None:
