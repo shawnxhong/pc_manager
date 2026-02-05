@@ -318,6 +318,35 @@ def _likely_pc_action(text: str) -> bool:
     return any(key in lowered for key in keywords) or any(key in text for key in cjk_keywords)
 
 
+def _llm_likely_pc_action(llm, text: str) -> bool:
+    if not text or llm is None:
+        return False
+    classifier_prompt = [
+        {
+            "role": "system",
+            "content": (
+                "You are a classifier for Windows PC management intents. "
+                "Return only JSON with a boolean field `pc_action`."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Decide if this user request likely needs opening a Windows settings, "
+                "control panel, or system tool. Reply only as JSON.\n"
+                f"Request: {text}"
+            ),
+        },
+    ]
+    try:
+        response = llm.chat(messages=classifier_prompt, stream=False)
+        raw = _extract_text(response)
+        parsed = json.loads(raw) if raw else {}
+        return bool(parsed.get("pc_action"))
+    except Exception:
+        return False
+
+
 class LangGraphAgentRunner:
     def __init__(self, llm, tools, system_prompt: str):
         self.llm = llm
@@ -415,11 +444,14 @@ class LangGraphAgentRunner:
                     msg.get("role") == "tool" for msg in messages[last_user_index + 1 :]
                 )
                 last_user_text = messages[last_user_index].get("content", "")
-                if not has_tool_after_user and _likely_pc_action(last_user_text):
-                    tool_request = {
-                        "name": "pc_manager_open",
-                        "args": {"intent": last_user_text},
-                    }
+                if not has_tool_after_user:
+                    if _likely_pc_action(last_user_text) or _llm_likely_pc_action(
+                        self.llm, last_user_text
+                    ):
+                        tool_request = {
+                            "name": "pc_manager_open",
+                            "args": {"intent": last_user_text},
+                        }
         logger.info(
             "LLM response parsed. followup=%s tool_request=%s roles=%s",
             followup,
