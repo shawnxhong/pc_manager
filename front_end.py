@@ -1,5 +1,7 @@
 import gradio as gr
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -24,20 +26,19 @@ def _format_status(status: dict) -> str:
     return f"Model: {status.get('model_id')} | Device: {status.get('device')}"
 
 
-def _messages_to_chatbot(messages: list[dict]) -> list[tuple[str, str]]:
-    chat_pairs = []
-    pending_user = None
+def _messages_to_chatbot(messages: list[dict]) -> list[dict]:
+    chat_messages = []
     for msg in messages:
         role = msg.get("role")
+        if role not in {"user", "assistant"}:
+            continue
         content = msg.get("content", "")
-        if role == "user":
-            pending_user = content
-        elif role == "assistant":
-            chat_pairs.append((pending_user or "", content))
-            pending_user = None
-    if pending_user:
-        chat_pairs.append((pending_user, ""))
-    return chat_pairs
+        payload = {"role": role, "content": content}
+        metadata = msg.get("metadata")
+        if metadata:
+            payload["metadata"] = metadata
+        chat_messages.append(payload)
+    return chat_messages
 
 
 class AgentGradio:
@@ -120,11 +121,11 @@ class AgentGradio:
 
             chat = gr.Chatbot(
                 value=[],
+                type="messages",
                 avatar_images=[user_logo, bot_logo],
                 height=720,
                 show_copy_button=True,
             )
-
             with gr.Row():
                 user_input = gr.Textbox(
                     placeholder=chatbot_config["input.placeholder"],
@@ -163,13 +164,22 @@ class AgentGradio:
                     return "", _messages_to_chatbot(history or []), history
                 history = history or []
                 history = history + [{"role": "user", "content": message}]
-                yield "", _messages_to_chatbot(history), history
-                try:
-                    updated = self.pipeline.run_agent(history)
-                except Exception as exc:
-                    updated = history + [
-                        {"role": "assistant", "content": f"Error: {exc}"}
-                    ]
+                pending_display = history + [
+                    {"role": "assistant", "content": "thinking for solutions..."}
+                ]
+                yield "", _messages_to_chatbot(pending_display), history
+                updated = None
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(self.pipeline.run_agent, history)
+                    while not future.done():
+                        yield "", _messages_to_chatbot(pending_display), history
+                        time.sleep(0.2)
+                    try:
+                        updated = future.result()
+                    except Exception as exc:
+                        updated = history + [
+                            {"role": "assistant", "content": f"Error: {exc}"}
+                        ]
 
                 assistant_index = None
                 for idx in range(len(updated) - 1, -1, -1):
@@ -180,7 +190,6 @@ class AgentGradio:
                 if assistant_index is None:
                     yield "", _messages_to_chatbot(updated), updated
                     return
-
                 full_text = str(updated[assistant_index].get("content", ""))
                 partial = ""
                 for ch in full_text:
