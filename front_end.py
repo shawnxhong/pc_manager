@@ -146,8 +146,13 @@ class AgentGradio:
                     type="filepath",
                     editable=False,
                 )
+                with gr.Row():
+                    asr_btn = gr.Button("Transcribe Voice")
+                asr_status = gr.Markdown(value="")
             else:
                 audio = None
+                asr_btn = None
+                asr_status = None
 
             def _load_model(selected_model, selected_device):
                 info = self.pipeline.ensure_loaded(
@@ -231,16 +236,17 @@ class AgentGradio:
             def _asr_to_input(wav_path, current_input):
                 asr_runner = getattr(self.pipeline, "asr_runner", None)
                 if not asr_runner or not wav_path:
-                    return current_input
+                    return current_input, "⚠️ No voice input detected."
                 try:
                     from pathlib import Path as _Path
 
                     text = asr_runner(_Path(wav_path))
                     if not isinstance(text, str) or not text.strip():
-                        return current_input
-                    return text.strip()
-                except Exception:
-                    return current_input
+                        return current_input, "⚠️ Could not transcribe voice. Please try again."
+                    text = text.strip()
+                    return text, f"✅ Transcribed: {text}"
+                except Exception as exc:
+                    return current_input, f"❌ ASR failed: {exc}"
 
             load_btn.click(
                 _load_model,
@@ -269,7 +275,13 @@ class AgentGradio:
                 audio.change(
                     _asr_to_input,
                     inputs=[audio, user_input],
-                    outputs=[user_input],
+                    outputs=[user_input, asr_status],
+                    queue=False,
+                )
+                asr_btn.click(
+                    _asr_to_input,
+                    inputs=[audio, user_input],
+                    outputs=[user_input, asr_status],
                     queue=False,
                 )
 
