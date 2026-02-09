@@ -3,9 +3,7 @@
 
 import argparse
 import json
-from json import tool
 import os
-from pyexpat.errors import messages
 import re
 import subprocess
 import logging
@@ -27,21 +25,17 @@ import threading
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ----------------- 常量：脚本目录 & 默认模型目录 -----------------
+# ---- Constants: script directory & default model directory ----
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
-# 模型根目录：project_root/model
 MODEL_ROOT = PROJECT_ROOT / "models"
 DEFAULT_OV_DIR = MODEL_ROOT / "Qwen3-4B-Instruct-ov"
 DEFAULT_HF_REPO = "shawnxhong/Qwen3-4B-Instruct-ov"
 
 
-# ----------------- IR 获取：从 HuggingFace 直接拉取 -----------------
+# ---- IR download: fetch from HuggingFace ----
 
 
 def ensure_openvino_ir(repo_id: str, model_dir: Path):
@@ -67,7 +61,7 @@ def ensure_openvino_ir(repo_id: str, model_dir: Path):
     print(f"[prepare] pulled model from HuggingFace to {model_dir}")
 
 
-# ----------------- LLM 构建 -----------------
+# ---- LLM construction ----
 def build_llm_cfg(model_path: Path, device: str, fast_kv: bool):
     if fast_kv:
         ov_config = {
@@ -104,23 +98,20 @@ def build_llm_cfg(model_path: Path, device: str, fast_kv: bool):
 
 
 def _messages_to_prompt(messages: list[dict]) -> str:
-    lines = []
+    """Format messages using the ChatML template expected by Qwen3."""
+    parts = []
     for msg in messages:
-        role = msg.get("role")
+        role = msg.get("role", "user")
         content = msg.get("content", "")
-        if role == "system":
-            lines.append(f"System: {content}")
-        elif role == "user":
-            lines.append(f"User: {content}")
-        elif role == "assistant":
-            lines.append(f"Assistant: {content}")
-        elif role == "function":
+        if role in ("function", "tool"):
             name = msg.get("name", "tool")
-            lines.append(f"Tool[{name}]: {content}")
+            parts.append(
+                f"<|im_start|>observation\n[{name}]: {content}<|im_end|>"
+            )
         else:
-            lines.append(f"{role}: {content}")
-    lines.append("Assistant:")
-    return "\n".join(lines)
+            parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+    parts.append("<|im_start|>assistant\n")
+    return "\n".join(parts)
 
 
 class OpenVINOChatModel:
@@ -136,6 +127,10 @@ class OpenVINOChatModel:
             return result
         return getattr(result, "text", None) or str(result)
 
+    def close(self):
+        """Release model resources."""
+        self.pipeline = None
+
 
 def build_llm(model_path: Path, device: str, fast_kv: bool):
     llm_cfg = build_llm_cfg(model_path, device, fast_kv)
@@ -148,7 +143,7 @@ def build_llm(model_path: Path, device: str, fast_kv: bool):
     return llm, llm_cfg
 
 
-# ----------------- 外部 ASR -----------------
+# ---- External ASR ----
 def run_asr(
     exe_path: Path,
     model_path: Path,
@@ -205,13 +200,11 @@ def run_asr(
     return transcript
 
 
-# ----------------- 占位 LLM -----------------
+# ---- Placeholder LLM ----
 
 
 class _UnloadedLLM:
-    """
-    启动/释放后的占位 LLM：未真正加载模型时使用。
-    """
+    """Placeholder LLM used before model loading or after release."""
 
     def __init__(self):
         self.model = "unloaded-llm"
@@ -357,34 +350,6 @@ def _likely_pc_action(text: str) -> bool:
     return any(key in lowered for key in keywords) or any(key in text for key in cjk_keywords)
 
 
-def _llm_likely_pc_action(llm, text: str) -> bool:
-    if not text or llm is None:
-        return False
-    classifier_prompt = [
-        {
-            "role": "system",
-            "content": (
-                "You are a classifier for Windows PC management intents. "
-                "Return only JSON with a boolean field `pc_action`."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                "Decide if this user request likely needs opening a Windows settings, "
-                "control panel, or system tool. Reply only as JSON.\n"
-                f"Request: {text}"
-            ),
-        },
-    ]
-    try:
-        response = llm.chat(messages=classifier_prompt, stream=False)
-        raw = _extract_text(response)
-        parsed = json.loads(raw) if raw else {}
-        return bool(parsed.get("pc_action"))
-    except Exception:
-        return False
-
 
 def _sanitize_pc_manager_args(name: str, args: dict) -> dict:
     if not isinstance(args, dict):
@@ -499,14 +464,11 @@ class LangGraphAgentRunner:
                     msg.get("role") == "tool" for msg in messages[last_user_index + 1 :]
                 )
                 last_user_text = messages[last_user_index].get("content", "")
-                if not has_tool_after_user:
-                    if _likely_pc_action(last_user_text) or _llm_likely_pc_action(
-                        self.llm, last_user_text
-                    ):
-                        tool_request = {
-                            "name": "pc_manager_open",
-                            "args": {"intent": last_user_text},
-                        }
+                if not has_tool_after_user and _likely_pc_action(last_user_text):
+                    tool_request = {
+                        "name": "pc_manager_open",
+                        "args": {"intent": last_user_text},
+                    }
         logger.info(
             "LLM response parsed. followup=%s tool_request=%s roles=%s",
             followup,
@@ -535,7 +497,7 @@ class LangGraphAgentRunner:
         tool = self.tool_map.get(name)
         if tool is None:
             result = json.dumps(
-                {"ok": False, "error": f"unknown tool: {os.name}"},
+                {"ok": False, "error": f"unknown tool: {name}"},
                 ensure_ascii=False,
             )
         else:
@@ -564,19 +526,15 @@ class LangGraphAgentRunner:
         return result["messages"]
 
 
-# ----------------- 统一流水线类：OpenVINOAgentPipeline -----------------
+# ---- Unified pipeline: OpenVINOAgentPipeline ----
 class OpenVINOAgentPipeline:
-    """
-    对外暴露的统一接口：
-      - initialized: 是否已经完成模型加载
-      - initialize(device, no_export): 加载/切换模型
-      - release(): 释放模型、清理资源
-      - benchmark(target_tokens): 简单 tokens/s 测试
+    """Unified interface for LLM + Agent + ASR.
 
-    内部持有：
-      - self.llm / self.llm_cfg
-      - self.agent_runner (LangGraph agent)
-      - self.tools (LangGraph tools)
+    Public API:
+      - initialized: whether the model is loaded
+      - initialize(device, no_export): load/switch model
+      - release(): release model resources
+      - benchmark(input_tokens, output_tokens): simple tokens/s test
     """
 
     def __init__(
@@ -625,61 +583,28 @@ class OpenVINOAgentPipeline:
     def llm_choices(self):
         return [self.model_id]
 
-    # ---- 内部：释放 LLM 资源 ----
     def _hard_drop_llm(self, llm):
-        try:
-            for attr in [
-                "compiled_model",
-                "core",
-                "tokenizer",
-                "pipeline",
-                "ov_model",
-                "_compiled_model",
-                "_core",
-                "_tokenizer",
-                "_pipeline",
-                "_ov_model",
-                "generation_config",
-                "streamer",
-                "_infer_req",
-                "kv_cache",
-            ]:
-                if hasattr(llm, attr):
-                    try:
-                        setattr(llm, attr, None)
-                    except Exception:
-                        pass
-            for fn in ("unload", "close", "teardown", "shutdown"):
-                m = getattr(llm, fn, None)
-                if callable(m):
-                    try:
-                        m()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    # ---- 对外：初始化 / 加载 ----
+        """Release LLM resources via its close() method."""
+        if llm is None:
+            return
+        close_fn = getattr(llm, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                pass
 
     def initialize(self, device: str = "GPU", no_export: bool = False) -> None:
-        """
-        准备/加载 OpenVINO LLM；多次调用是幂等的。
-        如 device 不同，会自动 release 后重新加载。
-        """
-        # 已经有模型且 device 一样，直接返回
+        """Load the OpenVINO LLM. Idempotent; auto-reloads if device changes."""
         with self._lock:
             if self.initialized and self.device == device:
                 return
 
-            # device 改变：先释放旧模型
             if self.initialized and self.device != device:
                 self.release()
 
-            # 确保 IR 在本地
             if not no_export:
                 ensure_openvino_ir(self.model_id, self.model_dir)
-
-            # 构造 LLM
             llm, llm_cfg = build_llm(self.model_dir, device, self.fast_kv)
             self.llm = llm
             self.llm_cfg = llm_cfg
@@ -692,9 +617,7 @@ class OpenVINOAgentPipeline:
             gc.collect()
 
     def get_status(self) -> Dict[str, Any]:
-        """
-        获取当前模型状态。
-        """
+        """Return current model status."""
         status = {
             "initialized": self.initialized,
             "model_id": (self.model_id if self.initialized else None),
@@ -759,12 +682,8 @@ class OpenVINOAgentPipeline:
             return self.get_status()
 
 
-    # ---- 对外：释放 ----
-
     def release(self) -> None:
-        """
-        释放当前模型资源，并将 Assistant 恢复为占位 LLM。
-        """
+        """Release model resources and restore the placeholder LLM."""
         with self._lock:
             llm = self.llm or getattr(self.agent_runner, "llm", None)
             if llm is not None and not isinstance(llm, _UnloadedLLM):
@@ -780,10 +699,7 @@ class OpenVINOAgentPipeline:
             gc.collect()
 
     def release_all(self) -> None:
-        """
-        释放当前模型资源，并将 Assistant 恢复为占位 LLM。
-        同时, 释放RAG 资源。
-        """
+        """Release model, RAG, and ASR resources."""
         with self._lock:
             try:
                 self.release()
@@ -805,7 +721,7 @@ class OpenVINOAgentPipeline:
 
             gc.collect()
 
-    # ---- 对外：benchmark ----
+    # ---- Benchmark ----
     def benchmark(self, input_tokens: int = 256, output_tokens: int = 128) -> Dict[str, Any]:
         from collections.abc import Iterator
         from time import perf_counter as _now
@@ -890,11 +806,11 @@ class OpenVINOAgentPipeline:
             best_tokens = tokens_for_n(0)
             method = "tokenizer+chat_template"
     
-            # 拉 hi 到超过 target
+            # Expand hi until it exceeds target
             while hi < 20000 and tokens_for_n(hi) < target_tokens:
                 hi = min(20000, hi * 2)
     
-            # 二分逼近
+            # Binary search to approximate
             while lo <= hi:
                 mid = (lo + hi) // 2
                 t = tokens_for_n(mid)
@@ -937,8 +853,8 @@ class OpenVINOAgentPipeline:
             first_t = None
     
             out_tokens_i = 0
-            accum_text = ""   # 用于识别“累积全文 chunk”
-            last_good = ""    # 兜底记录最后一次的 cur_text
+            accum_text = ""   # Track accumulated text for delta detection
+            last_good = ""    # Fallback: last valid text chunk
     
             try:
                 resp = self.llm.chat(messages=messages, stream=True, generate_cfg=gen_cfg)
@@ -953,15 +869,15 @@ class OpenVINOAgentPipeline:
     
                     last_good = cur
     
-                    # 关键：只算增量 delta
+                    # Only count the incremental delta
                     if cur.startswith(accum_text):
                         delta = cur[len(accum_text):]
                         accum_text = cur
                     elif accum_text.startswith(cur):
-                        # 有些实现会偶尔回退更短的文本，忽略
+                        # Some backends occasionally emit shorter text; skip
                         delta = ""
                     else:
-                        # 不可判定是累积还是增量：保守当作增量
+                        # Cannot determine if cumulative or delta; treat as delta
                         delta = cur
                         accum_text += cur
     
@@ -970,11 +886,11 @@ class OpenVINOAgentPipeline:
                         first_t = _now()
                     out_tokens_i += dtok
             else:
-                # 非 streaming：只能把整段当作输出
+                # Non-streaming: treat the entire response as output
                 cur = _extract_text(resp) or ""
                 last_good = cur
                 out_tokens_i = _count_delta_tokens(cur)
-                first_t = None  # TTFT 不可得，用 total 近似
+                first_t = None  # TTFT unavailable; approximate with total
     
             t1 = _now()
             total = max(t1 - t0, 1e-6)
@@ -1020,13 +936,11 @@ class OpenVINOAgentPipeline:
             "time_s": float(sum_total),
             "out_tokens_total": int(sum_out_tokens),
             "details": details,
-            "first_token_s": float(avg_ttft),  # 兼容你前端旧字段
+            "first_token_s": float(avg_ttft),  # Backward-compat alias for front-end
         }
 
     def chat(self, messages, **generate_cfg):
-        """
-        直接用当前 LLM 调 chat（不经过 Gradio UI）。
-        """
+        """Call the LLM directly (bypassing the agent/UI)."""
         if not self.initialized or self.llm is None:
             raise RuntimeError("LLM is not initialized")
 
@@ -1035,19 +949,7 @@ class OpenVINOAgentPipeline:
         return self.llm.chat(messages=messages)
 
     def run_agent(self, messages: list[dict]) -> list[dict]:
-        """
-        Run the LangGraph agent with the current message history.
-        """
-        if not self.initialized or self.llm is None:
-            raise RuntimeError("LLM is not initialized")
-        if self.agent_runner is None:
-            raise RuntimeError("Agent runner is not initialized")
-        return self.agent_runner.invoke(messages)
-
-    def run_agent(self, messages: list[dict]) -> list[dict]:
-        """
-        Run the LangGraph agent with the current message history.
-        """
+        """Run the LangGraph agent with the current message history."""
         if not self.initialized or self.llm is None:
             raise RuntimeError("LLM is not initialized")
         if self.agent_runner is None:
@@ -1055,7 +957,7 @@ class OpenVINOAgentPipeline:
         return self.agent_runner.invoke(messages)
 
 
-# ----------------- main：CLI 启动 Gradio UI -----------------
+# ---- main: CLI launcher for Gradio UI ----
 
 
 def main():
@@ -1065,29 +967,29 @@ def main():
     parser.add_argument(
         "--model-id",
         default=DEFAULT_HF_REPO,
-        help="HuggingFace 模型仓库名（例如 shawnxhong/Qwen3-4B-Instruct-ov）",
+        help="HuggingFace model repo (e.g. shawnxhong/Qwen3-4B-Instruct-ov)",
     )
     parser.add_argument(
         "--model-path",
         default=str(DEFAULT_OV_DIR),
-        help="OpenVINO IR 本地目录，默认放在 run_agent.py 同级的 Qwen3-4B-Instruct-ov/",
+        help="Local OpenVINO IR directory",
     )
     parser.add_argument(
         "--device",
         default="GPU",
         choices=["CPU", "GPU"],
-        help="推理设备",
+        help="Inference device",
     )
     parser.add_argument(
-        "--fast-kv", action="store_true", help="启用 KV-cache/激活量化等加速配置"
+        "--fast-kv", action="store_true", help="Enable KV-cache / activation quantization"
     )
     parser.add_argument(
         "--no-export",
         action="store_true",
-        help="跳过从 HuggingFace 拉取",
+        help="Skip pulling from HuggingFace",
     )
-    parser.add_argument("--port", type=int, default=7861, help="Gradio 端口")
-    parser.add_argument("--share", action="store_true", help="Gradio 共享外网")       
+    parser.add_argument("--port", type=int, default=7861, help="Gradio server port")
+    parser.add_argument("--share", action="store_true", help="Enable Gradio public sharing")       
     parser.add_argument(
         "--asr_model",
         type=Path,
@@ -1112,7 +1014,7 @@ def main():
 
     model_dir = Path(args.model_path)
 
-    # 构造统一流水线对象（此处先不主动 initialize，交给 UI 里的 Load 按钮触发）
+    # Build the pipeline object (don't initialize yet; UI Load button triggers it)
     asr_model = args.asr_model
     if not asr_model:
         asr_model = None
@@ -1127,13 +1029,13 @@ def main():
         asr_type=args.asr_type,
     )
 
-    # UI 封装 + demo 构建
+    # UI wrapper + demo construction
     from front_end import AgentGradio, agent_demo
 
     gradio_helper = AgentGradio(pipeline)
     demo = agent_demo(gradio_helper)
 
-    # 注意：真正的 initialize 由 UI 顶部的 Load Model 按钮触发
+    # Note: actual model initialization is triggered by the UI "Load Model" button
     demo.queue(default_concurrency_limit=1).launch(
         server_port=args.port,
         share=args.share,
