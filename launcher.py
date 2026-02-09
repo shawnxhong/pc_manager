@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import subprocess 
-from catalog import ToolItem, ToolItem, normalize_catalog
+from catalog import ToolItem
 from typing import Any, Dict, List, Optional
 from rag_index import Embedder, ToolRAGIndex
 

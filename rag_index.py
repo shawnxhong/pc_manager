@@ -16,6 +16,7 @@ from transformers import AutoTokenizer, AutoModel
 from catalog import ToolItem, build_embedding_text
  
 def _sha256_bytes(b: bytes) -> str:
+    """Return hex SHA-256 digest of raw bytes."""
     return hashlib.sha256(b).hexdigest()
  
  
@@ -30,15 +31,14 @@ def _default_models_dir() -> Path:
  
  
 def _repo_to_dirname(repo_id: str) -> str:
-    # "BAAI/bge-m3" -> "BAAI__bge-m3"（避免路径分隔符）
+    # "BAAI/bge-m3" -> "BAAI__bge-m3" (avoid path separators)
     return repo_id.replace("/", "__").replace("\\", "__")
  
  
 class Embedder:
-    """
-    支持两种：
-    - Transformers 向量（推荐，效果更好）：优先从 ..\\models 本地加载，不在本地才下载
-    - 退化：TF-IDF（不需要大模型下载，但效果差一些）
+    """Embedding backend with two modes:
+    - Transformers (recommended): loads from local models dir, downloads if needed
+    - TF-IDF fallback: no model download required, but lower quality
     """
  
     def __init__(
@@ -60,15 +60,11 @@ class Embedder:
         self._hf_backend_type = None  # "hf" or "tfidf"
  
     def _ensure_local_hf_model_dir(self) -> Path:
-        """
-        返回固定的本地模型目录：..\\models\\<repo_id_sanitized>
-        - 如果目录看起来完整，就直接返回（不触网）
-        - 否则尝试下载到该目录
-        """
+        """Return a local model directory, downloading from HuggingFace if needed."""
         local_dir = (self.models_dir / _repo_to_dirname(self.model_name)).resolve()
         local_dir.mkdir(parents=True, exist_ok=True)
  
-        # “看起来完整”的最小判据（不苛刻，避免漏掉 sharded 权重等情况）
+        # Minimal readiness check (not strict, to handle sharded weights etc.)
         likely_files = [
             local_dir / "config.json",
             local_dir / "tokenizer.json",
@@ -79,15 +75,16 @@ class Embedder:
         if looks_ready:
             return local_dir
  
-        # 本地不完整 -> 尝试下载
+        # Incomplete locally -> attempt download
         try:
             from huggingface_hub import snapshot_download
         except ImportError as e:
             raise RuntimeError(
-                "缺少 huggingface_hub，无法下载 embedding 模型。请安装：pip install huggingface_hub"
+                "Missing huggingface_hub; cannot download embedding model. "
+                "Install with: pip install huggingface_hub"
             ) from e
  
-        # 只在必要时下载；下载目标固定为 local_dir
+        # Download only when needed; target is always local_dir
         snapshot_download(
             repo_id=self.model_name,
             local_dir=str(local_dir),
@@ -100,18 +97,18 @@ class Embedder:
         if self._backend is not None:
             return
  
-        # 1) Transformers embedder（优先）
+        # 1) Transformers embedder (preferred)
         try: 
             self.models_dir.mkdir(parents=True, exist_ok=True)
             local_dir = (self.models_dir / _repo_to_dirname(self.model_name)).resolve()
  
-            # Step A: 先强制“只从本地加载”（不触网）
+            # Step A: Try loading from local dir only (no network)
             try:
                 tok = AutoTokenizer.from_pretrained(str(local_dir), local_files_only=True)
                 mdl = AutoModel.from_pretrained(str(local_dir), local_files_only=True)
                 self._local_model_dir = local_dir
             except Exception:
-                # Step B: 本地不可用 -> 下载到固定目录，再从本地加载
+                # Step B: Local unavailable -> download then load
                 local_dir = self._ensure_local_hf_model_dir()
                 tok = AutoTokenizer.from_pretrained(str(local_dir), local_files_only=True)
                 mdl = AutoModel.from_pretrained(str(local_dir), local_files_only=True)
@@ -175,23 +172,21 @@ class Embedder:
             )
 
     def close(self) -> None:
-        """
-        显式释放 embedding 模型/向量器占用的内存。
-        """
+        """Release embedding model/vectorizer memory."""
         try:
             import torch
         except Exception:
             torch = None
  
-        # 断开闭包引用
+        # Break closure references
         self._backend = None
  
-        # HF 模型释放
+        # Release HF model
         self._hf_tokenizer = None
         hf_model = self._hf_model
         self._hf_model = None
  
-        # 尽量触发显存回收
+        # Trigger GPU memory reclaim if possible
         if torch is not None:
             try:
                 if hf_model is not None:
@@ -296,15 +291,19 @@ class ToolRAGIndex:
                     data = np.load(str(p["emb"]))
                     self._embeddings = data["emb"].astype(np.float32)
  
-                    # backend state
+                    # backend state (with integrity check for pickle)
                     if self._backend_type == "tfidf":
                         import pickle
-                        self._backend_state = pickle.loads(p["tfidf"].read_bytes())
+                        raw = p["tfidf"].read_bytes()
+                        stored_hash = meta.get("tfidf_sha256")
+                        if stored_hash and _sha256_bytes(raw) != stored_hash:
+                            raise ValueError("tfidf.pkl integrity check failed")
+                        self._backend_state = pickle.loads(raw)
                     else:
                         self._backend_state = None
                     return
             except Exception:
-                # 任意异常都走重建
+                # Any error falls through to rebuild
                 pass
  
         self.build()
@@ -314,18 +313,21 @@ class ToolRAGIndex:
         texts = [build_embedding_text(it) for it in self.items]
         backend_type, backend_state, emb = self.embedder.embed_corpus(texts)
  
-        # 保存 items（只保存 dict，避免 dataclass 版本差异）
+        # Save items (as dicts to avoid dataclass version issues)
         items_payload = [it.to_dict() for it in self.items]
         p["items"].write_text(json.dumps(items_payload, ensure_ascii=False, indent=2), "utf-8")
  
-        # 保存 embeddings
+        # Save embeddings
         np.savez_compressed(str(p["emb"]), emb=emb.astype(np.float32))
  
-        # 保存 backend state
+        # Save backend state (with integrity hash for pickle)
         if backend_type == "tfidf":
             import pickle
-            p["tfidf"].write_bytes(pickle.dumps(backend_state))
+            raw = pickle.dumps(backend_state)
+            tfidf_hash = _sha256_bytes(raw)
+            p["tfidf"].write_bytes(raw)
         else:
+            tfidf_hash = None
             if p["tfidf"].exists():
                 try:
                     p["tfidf"].unlink()
@@ -337,6 +339,7 @@ class ToolRAGIndex:
             "catalog_fp": _catalog_fingerprint(self.items),
             "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "embedder_model": self.embedder.model_name,
+            "tfidf_sha256": tfidf_hash,
         }
         p["meta"].write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
  
@@ -355,7 +358,7 @@ class ToolRAGIndex:
         qv = self.embedder.embed_query(query, self._backend_type, self._backend_state)
         qv = qv.astype(np.float32)
  
-        # cosine: 因为我们存储时已归一化（hf）/或 tfidf 做过归一化
+        # Cosine similarity (embeddings are pre-normalized for both hf and tfidf)
         scores = self._embeddings @ qv
         k = max(1, min(int(top_k), len(self._tool_ids)))
         idx = np.argpartition(-scores, k - 1)[:k]
@@ -370,9 +373,7 @@ class ToolRAGIndex:
         return self._id_to_item.get(tool_id)
     
     def close(self) -> None:
-        """
-        释放rag 占用的内存资源
-        """
+        """Release RAG index memory."""
         self._embeddings = None
         self._tool_ids = None
         self._backend_state = None

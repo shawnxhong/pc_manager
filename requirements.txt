@@ -1,10 +1,7 @@
 openvino
+openvino-genai
 openvino-tokenizers[transformers]
-nncf
 torch
-torchvision
-datasets
-accelerate
 transformers
 langchain
 langchain-community
@@ -14,10 +11,9 @@ pydantic
 pydantic-core
 gradio==5.49.1
 gradio-client
-modelscope_studio
-optimum-intel
-qwen-agent==0.0.18
+requests
+numpy
+sentence-transformers
 pywin32
 comtypes
 pycaw
-sentence-transformers

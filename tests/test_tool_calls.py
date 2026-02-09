@@ -2,8 +2,9 @@ import unittest
 
 try:
     from run_agent import LangGraphAgentRunner
-except ModuleNotFoundError as exc:
-    raise unittest.SkipTest(f"Skipping tests, missing dependency: {exc}") from exc
+    _HAS_RUN_AGENT = True
+except (ModuleNotFoundError, ImportError):
+    _HAS_RUN_AGENT = False
 
 
 class FakeLLM:
@@ -31,6 +32,7 @@ class FakeTool:
         return '{"ok": true, "data": {"city": "shanghai", "temp": 25}}'
 
 
+@unittest.skipUnless(_HAS_RUN_AGENT, "run_agent deps not available")
 class ToolCallFlowTests(unittest.TestCase):
     def test_tool_call_executes_and_returns_response(self):
         llm = FakeLLM(
