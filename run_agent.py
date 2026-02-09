@@ -3,9 +3,7 @@
 
 import argparse
 import json
-from json import tool
 import os
-from pyexpat.errors import messages
 import re
 import subprocess
 import logging
@@ -27,21 +25,18 @@ import threading
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ----------------- 常量：脚本目录 & 默认模型目录 -----------------
+# ----------------- Constants: script directory & default model paths -----------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 
-# 模型根目录：project_root/model
+# Model root directory: project_root/models
 MODEL_ROOT = PROJECT_ROOT / "models"
 DEFAULT_OV_DIR = MODEL_ROOT / "Qwen3-4B-Instruct-ov"
 DEFAULT_HF_REPO = "shawnxhong/Qwen3-4B-Instruct-ov"
 
 
-# ----------------- IR 获取：从 HuggingFace 直接拉取 -----------------
+# ----------------- IR fetch: pull from HuggingFace -----------------
 
 
 def ensure_openvino_ir(repo_id: str, model_dir: Path):
@@ -67,7 +62,7 @@ def ensure_openvino_ir(repo_id: str, model_dir: Path):
     print(f"[prepare] pulled model from HuggingFace to {model_dir}")
 
 
-# ----------------- LLM 构建 -----------------
+# ----------------- LLM construction -----------------
 def build_llm_cfg(model_path: Path, device: str, fast_kv: bool):
     if fast_kv:
         ov_config = {
@@ -148,7 +143,7 @@ def build_llm(model_path: Path, device: str, fast_kv: bool):
     return llm, llm_cfg
 
 
-# ----------------- 外部 ASR -----------------
+# ----------------- External ASR -----------------
 def run_asr(
     exe_path: Path,
     model_path: Path,
@@ -205,12 +200,12 @@ def run_asr(
     return transcript
 
 
-# ----------------- 占位 LLM -----------------
+# ----------------- Placeholder LLM -----------------
 
 
 class _UnloadedLLM:
     """
-    启动/释放后的占位 LLM：未真正加载模型时使用。
+    Placeholder LLM used when no model is actually loaded.
     """
 
     def __init__(self):
@@ -223,9 +218,13 @@ class _UnloadedLLM:
         )
 
 
+MAX_TOOL_CALLS = 6
+
+
 class AgentState(TypedDict):
     messages: list[dict]
     tool_request: Optional[dict]
+    tool_call_count: int
 
 
 def _extract_text(response: Any) -> str:
@@ -427,7 +426,17 @@ class LangGraphAgentRunner:
 
     def _assistant_node(self, state: AgentState):
         messages = state.get("messages", [])
+        tool_call_count = state.get("tool_call_count", 0)
         followup = bool(messages and messages[-1].get("role") == "tool")
+        if tool_call_count >= MAX_TOOL_CALLS:
+            logger.warning("Max tool calls (%d) reached, stopping agent loop.", MAX_TOOL_CALLS)
+            return {
+                "messages": messages + [
+                    {"role": "assistant", "content": "I've reached the maximum number of tool calls. Please try rephrasing your request."}
+                ],
+                "tool_request": None,
+                "tool_call_count": tool_call_count,
+            }
         chat_messages = []
         for msg in messages:
             if msg.get("role") == "tool":
@@ -526,17 +535,20 @@ class LangGraphAgentRunner:
             return {
                 "messages": messages,
                 "tool_request": tool_request,
+                "tool_call_count": tool_call_count,
             }
         return {
             "messages": messages + [{"role": "assistant", "content": text}],
             "tool_request": None,
+            "tool_call_count": tool_call_count,
         }
 
     def _tool_node(self, state: AgentState):
         tool_request = state.get("tool_request")
         messages = state.get("messages", [])
+        tool_call_count = state.get("tool_call_count", 0)
         if not tool_request:
-            return {"messages": messages, "tool_request": None}
+            return {"messages": messages, "tool_request": None, "tool_call_count": tool_call_count}
         name = tool_request.get("name")
         args = tool_request.get("args") or {}
         args = _sanitize_pc_manager_args(name, args)
@@ -544,7 +556,7 @@ class LangGraphAgentRunner:
         tool = self.tool_map.get(name)
         if tool is None:
             result = json.dumps(
-                {"ok": False, "error": f"unknown tool: {os.name}"},
+                {"ok": False, "error": f"unknown tool: {name}"},
                 ensure_ascii=False,
             )
         else:
@@ -561,28 +573,29 @@ class LangGraphAgentRunner:
         return {
             "messages": messages + [{"role": "tool", "content": result, "name": name}],
             "tool_request": None,
+            "tool_call_count": tool_call_count + 1,
         }
 
     def invoke(self, messages: list[dict], recursion_limit: int = 6) -> list[dict]:
         if not messages or messages[0].get("role") != "system":
             messages = [{"role": "system", "content": self.system_prompt}] + messages
         result = self._graph.invoke(
-            {"messages": messages, "tool_request": None},
+            {"messages": messages, "tool_request": None, "tool_call_count": 0},
             config={"recursion_limit": recursion_limit},
         )
         return result["messages"]
 
 
-# ----------------- 统一流水线类：OpenVINOAgentPipeline -----------------
+# ----------------- Unified pipeline: OpenVINOAgentPipeline -----------------
 class OpenVINOAgentPipeline:
     """
-    对外暴露的统一接口：
-      - initialized: 是否已经完成模型加载
-      - initialize(device, no_export): 加载/切换模型
-      - release(): 释放模型、清理资源
-      - benchmark(target_tokens): 简单 tokens/s 测试
+    Unified public interface:
+      - initialized: whether the model has been loaded
+      - initialize(device, no_export): load / switch model
+      - release(): release model and clean up resources
+      - benchmark(target_tokens): simple tokens/s test
 
-    内部持有：
+    Internal state:
       - self.llm / self.llm_cfg
       - self.agent_runner (LangGraph agent)
       - self.tools (LangGraph tools)
@@ -634,7 +647,7 @@ class OpenVINOAgentPipeline:
     def llm_choices(self):
         return [self.model_id]
 
-    # ---- 内部：释放 LLM 资源 ----
+    # ---- Internal: release LLM resources ----
     def _hard_drop_llm(self, llm):
         try:
             for attr in [
@@ -668,27 +681,27 @@ class OpenVINOAgentPipeline:
         except Exception:
             pass
 
-    # ---- 对外：初始化 / 加载 ----
+    # ---- Public: initialize / load ----
 
     def initialize(self, device: str = "GPU", no_export: bool = False) -> None:
         """
-        准备/加载 OpenVINO LLM；多次调用是幂等的。
-        如 device 不同，会自动 release 后重新加载。
+        Prepare / load the OpenVINO LLM; multiple calls are idempotent.
+        If device differs, the old model is released and reloaded automatically.
         """
-        # 已经有模型且 device 一样，直接返回
+        # Model already loaded with same device, return immediately
         with self._lock:
             if self.initialized and self.device == device:
                 return
 
-            # device 改变：先释放旧模型
+            # Device changed: release old model first
             if self.initialized and self.device != device:
                 self.release()
 
-            # 确保 IR 在本地
+            # Ensure IR is available locally
             if not no_export:
                 ensure_openvino_ir(self.model_id, self.model_dir)
 
-            # 构造 LLM
+            # Build LLM
             llm, llm_cfg = build_llm(self.model_dir, device, self.fast_kv)
             self.llm = llm
             self.llm_cfg = llm_cfg
@@ -702,7 +715,7 @@ class OpenVINOAgentPipeline:
 
     def get_status(self) -> Dict[str, Any]:
         """
-        获取当前模型状态。
+        Get current model status.
         """
         status = {
             "initialized": self.initialized,
@@ -768,11 +781,11 @@ class OpenVINOAgentPipeline:
             return self.get_status()
 
 
-    # ---- 对外：释放 ----
+    # ---- Public: release ----
 
     def release(self) -> None:
         """
-        释放当前模型资源，并将 Assistant 恢复为占位 LLM。
+        Release current model resources and restore the assistant to a placeholder LLM.
         """
         with self._lock:
             llm = self.llm or getattr(self.agent_runner, "llm", None)
@@ -790,8 +803,8 @@ class OpenVINOAgentPipeline:
 
     def release_all(self) -> None:
         """
-        释放当前模型资源，并将 Assistant 恢复为占位 LLM。
-        同时, 释放RAG 资源。
+        Release current model resources and restore the assistant to a placeholder LLM.
+        Also release RAG resources.
         """
         with self._lock:
             try:
@@ -814,7 +827,7 @@ class OpenVINOAgentPipeline:
 
             gc.collect()
 
-    # ---- 对外：benchmark ----
+    # ---- Public: benchmark ----
     def benchmark(self, input_tokens: int = 256, output_tokens: int = 128) -> Dict[str, Any]:
         from collections.abc import Iterator
         from time import perf_counter as _now
@@ -899,11 +912,11 @@ class OpenVINOAgentPipeline:
             best_tokens = tokens_for_n(0)
             method = "tokenizer+chat_template"
     
-            # 拉 hi 到超过 target
+            # Increase hi until it exceeds target
             while hi < 20000 and tokens_for_n(hi) < target_tokens:
                 hi = min(20000, hi * 2)
     
-            # 二分逼近
+            # Binary search to approximate target
             while lo <= hi:
                 mid = (lo + hi) // 2
                 t = tokens_for_n(mid)
@@ -946,8 +959,8 @@ class OpenVINOAgentPipeline:
             first_t = None
     
             out_tokens_i = 0
-            accum_text = ""   # 用于识别“累积全文 chunk”
-            last_good = ""    # 兜底记录最后一次的 cur_text
+            accum_text = ""   # Used to detect "cumulative full-text chunks"
+            last_good = ""    # Fallback: record the last cur_text
     
             try:
                 resp = self.llm.chat(messages=messages, stream=True, generate_cfg=gen_cfg)
@@ -962,15 +975,15 @@ class OpenVINOAgentPipeline:
     
                     last_good = cur
     
-                    # 关键：只算增量 delta
+                    # Key: only count the incremental delta
                     if cur.startswith(accum_text):
                         delta = cur[len(accum_text):]
                         accum_text = cur
                     elif accum_text.startswith(cur):
-                        # 有些实现会偶尔回退更短的文本，忽略
+                        # Some implementations occasionally return shorter text; ignore
                         delta = ""
                     else:
-                        # 不可判定是累积还是增量：保守当作增量
+                        # Cannot determine if cumulative or incremental: conservatively treat as incremental
                         delta = cur
                         accum_text += cur
     
@@ -979,11 +992,11 @@ class OpenVINOAgentPipeline:
                         first_t = _now()
                     out_tokens_i += dtok
             else:
-                # 非 streaming：只能把整段当作输出
+                # Non-streaming: treat the entire response as output
                 cur = _extract_text(resp) or ""
                 last_good = cur
                 out_tokens_i = _count_delta_tokens(cur)
-                first_t = None  # TTFT 不可得，用 total 近似
+                first_t = None  # TTFT unavailable, approximate with total
     
             t1 = _now()
             total = max(t1 - t0, 1e-6)
@@ -1029,12 +1042,12 @@ class OpenVINOAgentPipeline:
             "time_s": float(sum_total),
             "out_tokens_total": int(sum_out_tokens),
             "details": details,
-            "first_token_s": float(avg_ttft),  # 兼容你前端旧字段
+            "first_token_s": float(avg_ttft),  # Backward-compatible with old frontend field
         }
 
     def chat(self, messages, **generate_cfg):
         """
-        直接用当前 LLM 调 chat（不经过 Gradio UI）。
+        Call chat directly on the current LLM (bypassing the Gradio UI).
         """
         if not self.initialized or self.llm is None:
             raise RuntimeError("LLM is not initialized")
@@ -1053,18 +1066,8 @@ class OpenVINOAgentPipeline:
             raise RuntimeError("Agent runner is not initialized")
         return self.agent_runner.invoke(messages)
 
-    def run_agent(self, messages: list[dict]) -> list[dict]:
-        """
-        Run the LangGraph agent with the current message history.
-        """
-        if not self.initialized or self.llm is None:
-            raise RuntimeError("LLM is not initialized")
-        if self.agent_runner is None:
-            raise RuntimeError("Agent runner is not initialized")
-        return self.agent_runner.invoke(messages)
 
-
-# ----------------- main：CLI 启动 Gradio UI -----------------
+# ----------------- main: launch Gradio UI from CLI -----------------
 
 
 def main():
@@ -1074,29 +1077,29 @@ def main():
     parser.add_argument(
         "--model-id",
         default=DEFAULT_HF_REPO,
-        help="HuggingFace 模型仓库名（例如 shawnxhong/Qwen3-4B-Instruct-ov）",
+        help="HuggingFace model repo name (e.g. shawnxhong/Qwen3-4B-Instruct-ov)",
     )
     parser.add_argument(
         "--model-path",
         default=str(DEFAULT_OV_DIR),
-        help="OpenVINO IR 本地目录，默认放在 run_agent.py 同级的 Qwen3-4B-Instruct-ov/",
+        help="Local OpenVINO IR directory, defaults to Qwen3-4B-Instruct-ov/ alongside run_agent.py",
     )
     parser.add_argument(
         "--device",
         default="GPU",
         choices=["CPU", "GPU"],
-        help="推理设备",
+        help="Inference device",
     )
     parser.add_argument(
-        "--fast-kv", action="store_true", help="启用 KV-cache/激活量化等加速配置"
+        "--fast-kv", action="store_true", help="Enable KV-cache / activation quantization acceleration"
     )
     parser.add_argument(
         "--no-export",
         action="store_true",
-        help="跳过从 HuggingFace 拉取",
+        help="Skip pulling from HuggingFace",
     )
-    parser.add_argument("--port", type=int, default=7861, help="Gradio 端口")
-    parser.add_argument("--share", action="store_true", help="Gradio 共享外网")       
+    parser.add_argument("--port", type=int, default=7861, help="Gradio port")
+    parser.add_argument("--share", action="store_true", help="Enable Gradio public sharing")       
     parser.add_argument(
         "--asr_model",
         type=Path,
@@ -1117,11 +1120,9 @@ def main():
 
     args = parser.parse_args()
 
-    os.environ["GIT_CLONE_PROTECTION_ACTIVE"] = "false"
-
     model_dir = Path(args.model_path)
 
-    # 构造统一流水线对象（此处先不主动 initialize，交给 UI 里的 Load 按钮触发）
+    # Build unified pipeline object (do not initialize here; let the UI Load button trigger it)
     asr_model = args.asr_model
     if not asr_model:
         asr_model = None
@@ -1136,13 +1137,13 @@ def main():
         asr_type=args.asr_type,
     )
 
-    # UI 封装 + demo 构建
+    # UI wrapper + demo construction
     from front_end import AgentGradio, agent_demo
 
     gradio_helper = AgentGradio(pipeline)
     demo = agent_demo(gradio_helper)
 
-    # 注意：真正的 initialize 由 UI 顶部的 Load Model 按钮触发
+    # Note: actual initialization is triggered by the Load Model button in the UI
     demo.queue(default_concurrency_limit=1).launch(
         server_port=args.port,
         share=args.share,

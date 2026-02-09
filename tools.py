@@ -11,28 +11,32 @@ from typing import Optional
 import requests
 from langchain_core.tools import tool
 
+import threading
+
 from launcher import PCManager
 from pc_manager_tables import MS_SETTINGS_ITEMS, CONTROL_PANEL_ITEMS, SYSTEM_TOOL_ITEMS
 
-# 索引落盘目录
 INDEX_DIR = Path(__file__).resolve().parent / ".pc_manager_index"
 _AUDIO_EXECUTOR: ThreadPoolExecutor | None = None
 
-# 全局单例：避免每次 tool call 都重建索引/重载 embedder
+# Global singleton: avoid rebuilding index / reloading embedder on every tool call
 _PC: Optional[PCManager] = None
+_PC_LOCK = threading.Lock()
 
 
 def _get_pc() -> PCManager:
     global _PC
     if _PC is None:
-        _PC = PCManager(
-            ms_settings_items=MS_SETTINGS_ITEMS,
-            control_panel_items=CONTROL_PANEL_ITEMS,
-            system_tool_items=SYSTEM_TOOL_ITEMS,
-            index_dir=INDEX_DIR,
-            embedder_model="BAAI/bge-m3",
-            embedder_device="cpu",
-        )
+        with _PC_LOCK:
+            if _PC is None:
+                _PC = PCManager(
+                    ms_settings_items=MS_SETTINGS_ITEMS,
+                    control_panel_items=CONTROL_PANEL_ITEMS,
+                    system_tool_items=SYSTEM_TOOL_ITEMS,
+                    index_dir=INDEX_DIR,
+                    embedder_model="BAAI/bge-m3",
+                    embedder_device="cpu",
+                )
     return _PC
 
 
@@ -50,17 +54,17 @@ def release_rag_resource() -> None:
 
 
 def _com_thread_init():
-    # 这个函数在音频线程启动时仅调用一次
+    # Called once when the audio thread starts
     from comtypes import CoInitializeEx, COINIT_MULTITHREADED
 
     try:
         CoInitializeEx(COINIT_MULTITHREADED)
     except OSError as e:
-        # -2147417850 = RPC_E_CHANGED_MODE, 已在别的模型初始化，继续用即可
+        # -2147417850 = RPC_E_CHANGED_MODE, already initialized in another mode, safe to continue
         if getattr(e, "winerror", None) != -2147417850:
             raise
     except Exception:
-        # 尝试最小化初始化
+        # Attempt minimal initialization
         from comtypes import CoInitialize
 
         CoInitialize()
@@ -72,7 +76,7 @@ def _get_audio_executor():
         _AUDIO_EXECUTOR = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="AudioCOM",
-            initializer=_com_thread_init,  # 在线程里初始化 COM，一直不 Uninitialize
+            initializer=_com_thread_init,  # Initialize COM in the thread; never CoUninitialize
         )
     return _AUDIO_EXECUTOR
 
@@ -214,7 +218,7 @@ def realtime_weather(
     def _err(msg):
         return json.dumps({"ok": False, "error": msg}, ensure_ascii=False)
 
-    # --- 使用城市名：wttr.in ---
+    # --- By city name: wttr.in ---
     if city:
         try:
             enc_city = urllib.parse.quote(city)
@@ -228,7 +232,7 @@ def realtime_weather(
 
             cc = (data.get("current_condition") or [{}])[0]
             area = (data.get("nearest_area") or [{}])[0]
-            # 按单位取温度/体感温度
+            # Pick temperature / feels-like by unit
             if unit == "fahrenheit":
                 temp = cc.get("temp_F")
                 feels = cc.get("FeelsLikeF")
@@ -287,7 +291,7 @@ def realtime_weather(
         except Exception as e:
             return _err(f"wttr.in failed: {e}")
 
-    # --- 使用经纬度：Open-Meteo ---
+    # --- By latitude/longitude: Open-Meteo ---
     if lat is not None and lon is not None:
         try:
             temp_unit = "fahrenheit" if unit == "fahrenheit" else "celsius"
@@ -313,10 +317,10 @@ def realtime_weather(
                 },
                 "current": {
                     "temperature": cw.get("temperature"),
-                    "feels_like": None,  # Open-Meteo current_weather 无体感温度
-                    "humidity_percent": None,  # 需额外字段，这里保持简洁
+                    "feels_like": None,  # Open-Meteo current_weather has no feels-like temperature
+                    "humidity_percent": None,  # Requires extra fields, keeping it simple here
                     "wind_kph": cw.get("windspeed"),
-                    "description": None,  # 需要天气码翻译，可按需扩展
+                    "description": None,  # Would need weather code translation, can be extended
                     "observation_time": cw.get("time"),
                     "unit": temp_unit,
                 },

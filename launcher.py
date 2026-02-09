@@ -5,27 +5,53 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
-import subprocess 
-from catalog import ToolItem, ToolItem, normalize_catalog
+import re
+import subprocess
+from catalog import ToolItem
 from typing import Any, Dict, List, Optional
 from rag_index import Embedder, ToolRAGIndex
 
  
+_SHELL_META = re.compile(r'[;&|`$<>()"\'\n\r]')
+
+
+def _validate_launch_value(item: ToolItem) -> Optional[str]:
+    """Return an error message if the launch value looks suspicious, else None."""
+    kind = item.launch_kind
+    value = item.launch_value
+    args = item.args or ()
+
+    # Reject shell metacharacters in value or args
+    for part in (value, *args):
+        if _SHELL_META.search(part):
+            return f"launch value or arg contains shell metacharacters: {part!r}"
+
+    if kind == "ms_settings_uri" and not value.startswith("ms-settings:"):
+        return f"ms_settings_uri must start with 'ms-settings:', got: {value!r}"
+    if kind == "control_panel_cpl" and not value.lower().endswith(".cpl"):
+        return f"control_panel_cpl must end with '.cpl', got: {value!r}"
+    if kind == "msc" and not value.lower().endswith(".msc"):
+        return f"msc must end with '.msc', got: {value!r}"
+    if kind == "exe" and not value.lower().endswith(".exe"):
+        return f"exe must end with '.exe', got: {value!r}"
+    return None
+
+
 @dataclass
 class LaunchResult:
     ok: bool
     cmdline: List[str]
     pid: Optional[int] = None
     error: Optional[str] = None
- 
- 
+
+
 def build_cmdline(item: ToolItem) -> List[str]:
     k = item.launch_kind
     v = item.launch_value
     args = list(item.args or ())
  
     if k == "ms_settings_uri":
-        # 用 cmd start 打开 URI（最稳）
+        # Use cmd start to open URI (most reliable)
         return ["cmd", "/c", "start", "", v]
  
     if k == "control_panel_home":
@@ -40,19 +66,23 @@ def build_cmdline(item: ToolItem) -> List[str]:
         return ["control.exe", v]
  
     if k == "msc":
-        # 统一走 mmc.exe，避免 WinError 193
+        # Use mmc.exe uniformly to avoid WinError 193
         return ["mmc.exe", v] + args
  
     if k == "exe":
         return [v] + args
  
-    # 理论上不会到这里
+    # Should not reach here
     return ["cmd", "/c", "start", "", v]
  
  
 def launch(item: ToolItem) -> LaunchResult:
+    err = _validate_launch_value(item)
+    if err:
+        return LaunchResult(ok=False, cmdline=[], error=f"validation failed: {err}")
+
     cmd = build_cmdline(item)
- 
+
     try:
         creation_flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
         proc = subprocess.Popen(
@@ -147,7 +177,7 @@ class PCManager:
         min_margin: float = 0.005,
         target_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        # 允许 agent “指定打开某个候选项”，彻底消除二义性
+        # Allow agent to specify a candidate, eliminating ambiguity
         if target_id:
             it = self.id_to_item.get(target_id)
             if not it:
@@ -181,7 +211,7 @@ class PCManager:
                 "candidates": r.candidates,
             }
  
-        # 歧义判断：分数太低或 top1/top2 太接近就不自动打开
+        # Ambiguity check: skip auto-open if score is too low or top-1/top-2 gap is too small
         best = r.candidates[0]
         score1 = float(best["score"])
         score2 = float(r.candidates[1]["score"]) if len(r.candidates) > 1 else -1.0
