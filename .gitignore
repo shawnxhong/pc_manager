@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+.pc_manager_index/
+chat_dumps/
+models/
