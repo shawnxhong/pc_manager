@@ -104,6 +104,12 @@ class AgentGradio:
             footer {
                 display: none !important;
             }
+            #hidden-dump-file {
+                height: 0 !important;
+                overflow: hidden !important;
+                margin: 0 !important;
+                padding: 0 !important;
+            }
             """,
         ) as demo:
             state = gr.State([])
@@ -169,7 +175,7 @@ class AgentGradio:
             with gr.Row():
                 clear_btn = gr.Button("Clear")
                 dump_btn = gr.Button("Dump Chat JSON")
-            dump_file = gr.File(label="Chat Dump", interactive=False)
+            dump_file = gr.File(interactive=False, elem_id="hidden-dump-file")
 
             initial_suggestions = _pick_suggestions()
             suggestions_state = gr.State(initial_suggestions)
@@ -412,6 +418,9 @@ class AgentGradio:
                 _dump_chat, inputs=[state], outputs=[dump_file]
             ).then(
                 _enable_btns, outputs=all_btns
+            ).then(
+                fn=None,
+                js="() => { setTimeout(() => { const a = document.querySelector('#hidden-dump-file a[download]'); if (a) a.click(); }, 300); }",
             )
 
             for idx, q_btn in enumerate([q_btn_1, q_btn_2, q_btn_3]):
