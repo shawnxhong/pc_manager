@@ -102,20 +102,45 @@ class AgentGradio:
             state = gr.State([])
 
             with gr.Row():
+                with gr.Column(scale=10):
+                    gr.HTML(
+                        """
+                    <div style="text-align: left; margin-bottom: 10px;">
+                        <h1>🤖 Agentic PC Manager</h1>
+                    </div>
+                    """
+                    )
+                with gr.Column(scale=1, min_width=80):
+                    release_btn = gr.Button(
+                        "🗑️ Release", variant="secondary", size="md", min_width=70
+                    )
+                    # btn_clear = gr.Button("🧹 Clear Chat", variant="secondary", size="md", min_width=70)
+
+            gr.HTML(
+                """
+            <div style="text-align: left; margin-bottom: 10px; font-size: 18px;">
+                Agentic chatbot to bridge your intentions with Windows settings and Windows system tools.
+            </div>
+            """
+            )
+
+            with gr.Row():
                 model_id = gr.Dropdown(
                     label="Model",
                     choices=llm_choices,
                     value=default_llm,
                     interactive=True,
+                    scale=1,
                 )
                 device = gr.Dropdown(
                     label="Device",
                     choices=["CPU", "GPU"],
                     value="GPU",
                     interactive=True,
+                    scale=1,
                 )
-                load_btn = gr.Button("Load Model")
-                release_btn = gr.Button("Release Model")
+                with gr.Column(scale=1, elem_classes=["button-center"]):
+                    load_btn = gr.Button("Load Model", variant="primary")
 
             status = gr.Markdown(value=_format_status(self.pipeline.get_status()))
 
