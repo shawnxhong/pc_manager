@@ -148,13 +148,6 @@ class AISpeechASRRunner:
                 streamer=streamer,
             )
 
-            # text = out if out else "".join(chunks)
-            # if not isinstance(text, str):
-            #     text = str(text)
-
-            # # minimal normalize (NOT regex tag stripping)
-            # text = " ".join(text.split()).strip()
-            # return text
             text = out if out else "".join(chunks)
             text = strip_asr_tags(text)
             return text

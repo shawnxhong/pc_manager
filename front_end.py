@@ -86,7 +86,7 @@ class AgentGradio:
         dump_dir.mkdir(parents=True, exist_ok=True)
 
         with gr.Blocks(
-            title="Agentic PC Manager",
+            title="Agentic PC Manager 2.0",
             analytics_enabled=False,
             theme=gr.themes.Soft(primary_hue="blue"),
             css="""
@@ -164,26 +164,29 @@ class AgentGradio:
                 height=720,
                 show_copy_button=True,
             )
+
+            initial_suggestions = _pick_suggestions()
+            suggestions_state = gr.State(initial_suggestions)
+            with gr.Row():
+                q_btn_1 = gr.Button(initial_suggestions[0], variant="secondary", size="md")
+                q_btn_2 = gr.Button(initial_suggestions[1], variant="secondary", size="md")
+                q_btn_3 = gr.Button(initial_suggestions[2], variant="secondary", size="md")
+                refresh_btn = gr.Button("🔄Refresh Questions", variant="primary", size="md", min_width=50)
+
             with gr.Row():
                 user_input = gr.Textbox(
                     placeholder=chatbot_config["input.placeholder"],
                     label="",
                     lines=2,
+                    scale=8
                 )
-                send_btn = gr.Button("Send")
+                with gr.Column(scale=1, elem_classes=["button-center"]):
+                    send_btn = gr.Button("Send", variant="primary", size="md")
 
             with gr.Row():
                 clear_btn = gr.Button("Clear")
                 dump_btn = gr.Button("Dump Chat JSON")
             dump_file = gr.File(interactive=False, elem_id="hidden-dump-file")
-
-            initial_suggestions = _pick_suggestions()
-            suggestions_state = gr.State(initial_suggestions)
-            with gr.Row():
-                q_btn_1 = gr.Button(initial_suggestions[0], variant="secondary", size="sm")
-                q_btn_2 = gr.Button(initial_suggestions[1], variant="secondary", size="sm")
-                q_btn_3 = gr.Button(initial_suggestions[2], variant="secondary", size="sm")
-                refresh_btn = gr.Button("🔄", variant="secondary", size="sm", min_width=50)
 
             if asr_enabled:
                 audio = gr.Audio(
