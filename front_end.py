@@ -194,6 +194,27 @@ class AgentGradio:
                 asr_btn = None
                 asr_status = None
 
+            with gr.Accordion("Benchmark", open=False):
+                with gr.Column():
+                    bench_in_tokens = gr.Slider(
+                        label="Benchmark: input tokens (prompt length)",
+                        minimum=64,
+                        maximum=2048,
+                        step=64,
+                        value=256,
+                        interactive=True,
+                    )
+                    bench_out_tokens = gr.Slider(
+                        label="Benchmark: output max_new_tokens",
+                        minimum=16,
+                        maximum=512,
+                        step=16,
+                        value=128,
+                        interactive=True,
+                    )
+                    bench_btn = gr.Button("📊 Run Benchmark", variant="primary")
+                    bench_result = gr.Markdown("**tokens/s:** –")
+
             def _load_model(selected_model, selected_device):
                 info = self.pipeline.ensure_loaded(
                     model_id=selected_model, device=selected_device, no_export=False
@@ -291,7 +312,7 @@ class AgentGradio:
             # -- Collect all interactive buttons for disable/enable pattern --
             all_btns = [
                 send_btn, clear_btn, dump_btn, load_btn, release_btn,
-                q_btn_1, q_btn_2, q_btn_3, refresh_btn,
+                q_btn_1, q_btn_2, q_btn_3, refresh_btn, bench_btn,
             ]
             if asr_btn is not None:
                 all_btns.append(asr_btn)
@@ -315,6 +336,31 @@ class AgentGradio:
                 def _handler(suggestions, history):
                     yield from _submit_message(suggestions[idx], history)
                 return _handler
+
+            def _run_benchmark(in_tok, out_tok):
+                result = self.pipeline.benchmark(
+                    input_tokens=int(in_tok), output_tokens=int(out_tok)
+                )
+                if not result.get("ok"):
+                    return f"**Benchmark failed:** {result.get('error', 'unknown error')}"
+                tps = result.get("tokens_per_s", 0)
+                ttft = result.get("ttft_s", 0)
+                tpot = result.get("tpot_s")
+                total = result.get("time_s", 0)
+                out_total = result.get("out_tokens_total", 0)
+                in_actual = result.get("input_tokens_actual", "?")
+                lines = [
+                    f"**tokens/s:** {tps:.2f}",
+                    f"**TTFT:** {ttft:.3f}s",
+                ]
+                if tpot is not None:
+                    lines.append(f"**TPOT:** {tpot:.4f}s")
+                lines += [
+                    f"**Total time:** {total:.2f}s",
+                    f"**Input tokens (actual):** {in_actual}",
+                    f"**Output tokens:** {out_total}",
+                ]
+                return " | ".join(lines)
 
             # -- Wire events with disable/enable pattern --
 
@@ -384,6 +430,16 @@ class AgentGradio:
             ).then(
                 _refresh_suggestions,
                 outputs=[suggestions_state, q_btn_1, q_btn_2, q_btn_3]
+            ).then(
+                _enable_btns, outputs=all_btns
+            )
+
+            bench_btn.click(
+                _disable_btns, outputs=all_btns
+            ).then(
+                _run_benchmark,
+                inputs=[bench_in_tokens, bench_out_tokens],
+                outputs=[bench_result], queue=True
             ).then(
                 _enable_btns, outputs=all_btns
             )
