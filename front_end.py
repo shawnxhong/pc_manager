@@ -1,10 +1,13 @@
 import gradio as gr
 import json
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from questions import QUESTION_POOL
 
 BASE_DIR = Path(__file__).resolve().parent
 bot_logo = BASE_DIR / "bot.jpg"
@@ -39,6 +42,10 @@ def _messages_to_chatbot(messages: list[dict]) -> list[dict]:
             payload["metadata"] = metadata
         chat_messages.append(payload)
     return chat_messages
+
+
+def _pick_suggestions():
+    return random.sample(QUESTION_POOL, min(3, len(QUESTION_POOL)))
 
 
 class AgentGradio:
@@ -164,6 +171,14 @@ class AgentGradio:
                 dump_btn = gr.Button("Dump Chat JSON")
             dump_file = gr.File(label="Chat Dump", interactive=False)
 
+            initial_suggestions = _pick_suggestions()
+            suggestions_state = gr.State(initial_suggestions)
+            with gr.Row():
+                q_btn_1 = gr.Button(initial_suggestions[0], variant="secondary", size="sm")
+                q_btn_2 = gr.Button(initial_suggestions[1], variant="secondary", size="sm")
+                q_btn_3 = gr.Button(initial_suggestions[2], variant="secondary", size="sm")
+                refresh_btn = gr.Button("🔄", variant="secondary", size="sm", min_width=50)
+
             if asr_enabled:
                 audio = gr.Audio(
                     label="🎙️ Voice Input",
@@ -273,28 +288,105 @@ class AgentGradio:
                 except Exception as exc:
                     return current_input, f"❌ ASR failed: {exc}"
 
+            # -- Collect all interactive buttons for disable/enable pattern --
+            all_btns = [
+                send_btn, clear_btn, dump_btn, load_btn, release_btn,
+                q_btn_1, q_btn_2, q_btn_3, refresh_btn,
+            ]
+            if asr_btn is not None:
+                all_btns.append(asr_btn)
+
+            def _disable_btns():
+                return [gr.update(interactive=False)] * len(all_btns)
+
+            def _enable_btns():
+                return [gr.update(interactive=True)] * len(all_btns)
+
+            def _refresh_suggestions():
+                new = _pick_suggestions()
+                return (
+                    new,
+                    gr.update(value=new[0]),
+                    gr.update(value=new[1]),
+                    gr.update(value=new[2]),
+                )
+
+            def _make_question_handler(idx):
+                def _handler(suggestions, history):
+                    yield from _submit_message(suggestions[idx], history)
+                return _handler
+
+            # -- Wire events with disable/enable pattern --
+
             load_btn.click(
-                _load_model,
-                inputs=[model_id, device],
-                outputs=[status],
-                queue=True,
+                _disable_btns, outputs=all_btns
+            ).then(
+                _load_model, inputs=[model_id, device], outputs=[status], queue=True
+            ).then(
+                _enable_btns, outputs=all_btns
             )
-            release_btn.click(_release_model, outputs=[status], queue=True)
+
+            release_btn.click(
+                _disable_btns, outputs=all_btns
+            ).then(
+                _release_model, outputs=[status], queue=True
+            ).then(
+                _enable_btns, outputs=all_btns
+            )
 
             send_btn.click(
-                _submit_message,
-                inputs=[user_input, state],
-                outputs=[user_input, chat, state],
-                queue=True,
+                _disable_btns, outputs=all_btns
+            ).then(
+                _submit_message, inputs=[user_input, state],
+                outputs=[user_input, chat, state], queue=True
+            ).then(
+                _enable_btns, outputs=all_btns
             )
+
             user_input.submit(
-                _submit_message,
-                inputs=[user_input, state],
-                outputs=[user_input, chat, state],
-                queue=True,
+                _disable_btns, outputs=all_btns
+            ).then(
+                _submit_message, inputs=[user_input, state],
+                outputs=[user_input, chat, state], queue=True
+            ).then(
+                _enable_btns, outputs=all_btns
             )
-            clear_btn.click(_clear_chat, outputs=[chat, state], queue=False)
-            dump_btn.click(_dump_chat, inputs=[state], outputs=[dump_file], queue=False)
+
+            clear_btn.click(
+                _disable_btns, outputs=all_btns
+            ).then(
+                _clear_chat, outputs=[chat, state]
+            ).then(
+                _enable_btns, outputs=all_btns
+            )
+
+            dump_btn.click(
+                _disable_btns, outputs=all_btns
+            ).then(
+                _dump_chat, inputs=[state], outputs=[dump_file]
+            ).then(
+                _enable_btns, outputs=all_btns
+            )
+
+            for idx, q_btn in enumerate([q_btn_1, q_btn_2, q_btn_3]):
+                q_btn.click(
+                    _disable_btns, outputs=all_btns
+                ).then(
+                    _make_question_handler(idx),
+                    inputs=[suggestions_state, state],
+                    outputs=[user_input, chat, state], queue=True
+                ).then(
+                    _enable_btns, outputs=all_btns
+                )
+
+            refresh_btn.click(
+                _disable_btns, outputs=all_btns
+            ).then(
+                _refresh_suggestions,
+                outputs=[suggestions_state, q_btn_1, q_btn_2, q_btn_3]
+            ).then(
+                _enable_btns, outputs=all_btns
+            )
 
             if audio is not None:
                 audio.change(
@@ -304,10 +396,13 @@ class AgentGradio:
                     queue=False,
                 )
                 asr_btn.click(
+                    _disable_btns, outputs=all_btns
+                ).then(
                     _asr_to_input,
                     inputs=[audio, user_input],
-                    outputs=[user_input, asr_status],
-                    queue=False,
+                    outputs=[user_input, asr_status]
+                ).then(
+                    _enable_btns, outputs=all_btns
                 )
 
         return demo
