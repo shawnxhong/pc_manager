@@ -50,10 +50,10 @@ def _pick_suggestions():
 
 class AgentGradio:
     """
-    对外暴露的 Gradio 封装类:
-
-    - 持有一个 OpenVINOAgentPipeline 实例（self.pipeline）
-    - 提供统一接口：
+    Gradio wrapper class exposed to the outside:
+    
+    - Holds an OpenVINOAgentPipeline instance (self.pipeline)
+    - Provides a unified interface:
         - initialize(model_dir, device)
         - release()
         - build_demo() -> gr.Blocks
