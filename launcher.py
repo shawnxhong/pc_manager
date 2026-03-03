@@ -25,7 +25,7 @@ def build_cmdline(item: ToolItem) -> List[str]:
     args = list(item.args or ())
  
     if k == "ms_settings_uri":
-        # 用 cmd start 打开 URI（最稳）
+        # open URI using cmd start
         return ["cmd", "/c", "start", "", v]
  
     if k == "control_panel_home":
@@ -40,13 +40,12 @@ def build_cmdline(item: ToolItem) -> List[str]:
         return ["control.exe", v]
  
     if k == "msc":
-        # 统一走 mmc.exe，避免 WinError 193
+        # Always use mmc.exe to avoid WinError 193
         return ["mmc.exe", v] + args
  
     if k == "exe":
         return [v] + args
  
-    # 理论上不会到这里
     return ["cmd", "/c", "start", "", v]
  
  
@@ -147,7 +146,7 @@ class PCManager:
         min_margin: float = 0.005,
         target_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        # 允许 agent “指定打开某个候选项”，彻底消除二义性
+        # Allow agent to "specify a candidate to open", completely eliminating ambiguity
         if target_id:
             it = self.id_to_item.get(target_id)
             if not it:
@@ -181,7 +180,7 @@ class PCManager:
                 "candidates": r.candidates,
             }
  
-        # 歧义判断：分数太低或 top1/top2 太接近就不自动打开
+        # Ambiguity check: do not automatically open if the score is too low or top1/top2 are too close
         best = r.candidates[0]
         score1 = float(best["score"])
         score2 = float(r.candidates[1]["score"]) if len(r.candidates) > 1 else -1.0

@@ -44,13 +44,13 @@ class ToolItem:
  
 def _iter_items(obj: Any) -> Iterable[Dict[str, Any]]:
     """
-    兼容表可能是 list[dict] 或 dict[id->dict]。
-    统一产出 dict item。
+    Compatible table may be list[dict] or dict[id->dict].
+    Unified output of dict item.
     """
     if obj is None:
         return []
     if isinstance(obj, dict):
-        # 可能是 {id: {...}} 或已经是单个 item
+        # It may be {id: {...}} or already a single item
         if "id" in obj and "launch" in obj:
             return [obj]
         items = []
@@ -84,7 +84,7 @@ def normalize_catalog(
         if not tid or not title or not desc or not kind:
             return None
  
-        # 规范 kind
+        # Normalize kind
         kind_map = {
             "ms_settings": "ms_settings_uri",
             "uri": "ms_settings_uri",
@@ -108,21 +108,21 @@ def normalize_catalog(
         ):
             return None
  
-        # 自动补 domain
-        # launch_value 校验：ms-settings 必须 ms-settings: 开头
+        # Auto-fill domain
+        # launch_value validation: ms-settings must start with ms-settings:
         if kind2 == "ms_settings_uri":
             if not value.startswith("ms-settings:"):
                 return None
  
-        # cpl 允许为空？不允许
+        # cpl cannot be empty
         if kind2 == "control_panel_cpl" and not value:
             return None
  
-        # exe/msc 也不允许空
+        # exe/msc cannot be empty
         if kind2 in ("exe", "msc") and not value:
             return None
  
-        # args 规范
+        # args normalization
         if not isinstance(args, list):
             args = []
         args2 = tuple(str(a) for a in args if a is not None)
@@ -152,7 +152,7 @@ def normalize_catalog(
         if item:
             out.append(item)
  
-    # 去重：同 id 只保留第一个
+    # Deduplication: only keep the first occurrence of each id
     seen = set()
     dedup = []
     for it in out:
@@ -166,7 +166,7 @@ def normalize_catalog(
  
 def build_embedding_text(item: ToolItem) -> str:
     """
-    给向量检索用的“文档文本”：
+    Document text for vector retrieval:
     """
     return (
         f"[{item.domain}] {item.title}\n"

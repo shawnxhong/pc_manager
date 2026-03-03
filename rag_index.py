@@ -30,15 +30,15 @@ def _default_models_dir() -> Path:
  
  
 def _repo_to_dirname(repo_id: str) -> str:
-    # "BAAI/bge-m3" -> "BAAI__bge-m3"（避免路径分隔符）
+    # "BAAI/bge-m3" -> "BAAI__bge-m3"
     return repo_id.replace("/", "__").replace("\\", "__")
  
  
 class Embedder:
     """
-    支持两种：
-    - Transformers 向量（推荐，效果更好）：优先从 ..\\models 本地加载，不在本地才下载
-    - 退化：TF-IDF（不需要大模型下载，但效果差一些）
+    Supports two types:
+    - Transformers embeddings (recommended, better performance): prioritize loading from ..\\models locally, download only if not available locally
+    - Degraded: TF-IDF (no need to download large models, but performance is worse)
     """
  
     def __init__(
@@ -61,14 +61,14 @@ class Embedder:
  
     def _ensure_local_hf_model_dir(self) -> Path:
         """
-        返回固定的本地模型目录：..\\models\\<repo_id_sanitized>
-        - 如果目录看起来完整，就直接返回（不触网）
-        - 否则尝试下载到该目录
+        Returns the fixed local model directory: ..\\models\\<repo_id_sanitized>
+        - If the directory looks complete, return it directly (no network access)
+        - Otherwise, attempt to download to this directory
         """
         local_dir = (self.models_dir / _repo_to_dirname(self.model_name)).resolve()
         local_dir.mkdir(parents=True, exist_ok=True)
  
-        # “看起来完整”的最小判据（不苛刻，避免漏掉 sharded 权重等情况）
+        # The minimal criterion for "looks complete" (not strict, to avoid missing sharded weights, etc.)
         likely_files = [
             local_dir / "config.json",
             local_dir / "tokenizer.json",
@@ -79,15 +79,15 @@ class Embedder:
         if looks_ready:
             return local_dir
  
-        # 本地不完整 -> 尝试下载
+        # Local incomplete -> attempt to download
         try:
             from huggingface_hub import snapshot_download
         except ImportError as e:
             raise RuntimeError(
-                "缺少 huggingface_hub，无法下载 embedding 模型。请安装：pip install huggingface_hub"
+                "Missing huggingface_hub, unable to download embedding model. Please install: pip install huggingface_hub"
             ) from e
  
-        # 只在必要时下载；下载目标固定为 local_dir
+        # Download only if necessary; target fixed to local_dir
         snapshot_download(
             repo_id=self.model_name,
             local_dir=str(local_dir),
@@ -100,18 +100,18 @@ class Embedder:
         if self._backend is not None:
             return
  
-        # 1) Transformers embedder（优先）
+        # 1) Transformers embedder (priority)
         try: 
             self.models_dir.mkdir(parents=True, exist_ok=True)
             local_dir = (self.models_dir / _repo_to_dirname(self.model_name)).resolve()
  
-            # Step A: 先强制“只从本地加载”（不触网）
+            # Step A: Force "local only" loading (no network access)
             try:
                 tok = AutoTokenizer.from_pretrained(str(local_dir), local_files_only=True)
                 mdl = AutoModel.from_pretrained(str(local_dir), local_files_only=True)
                 self._local_model_dir = local_dir
             except Exception:
-                # Step B: 本地不可用 -> 下载到固定目录，再从本地加载
+                # Step B: Local unavailable -> download to fixed directory, then load from local
                 local_dir = self._ensure_local_hf_model_dir()
                 tok = AutoTokenizer.from_pretrained(str(local_dir), local_files_only=True)
                 mdl = AutoModel.from_pretrained(str(local_dir), local_files_only=True)
@@ -176,22 +176,22 @@ class Embedder:
 
     def close(self) -> None:
         """
-        显式释放 embedding 模型/向量器占用的内存。
+        Explicitly release the memory occupied by the embedding model/vectorizer.
         """
         try:
             import torch
         except Exception:
             torch = None
  
-        # 断开闭包引用
+        # Break closure references
         self._backend = None
  
-        # HF 模型释放
+        # Release HF model
         self._hf_tokenizer = None
         hf_model = self._hf_model
         self._hf_model = None
  
-        # 尽量触发显存回收
+        # Attempt to trigger GPU memory release
         if torch is not None:
             try:
                 if hf_model is not None:
@@ -304,7 +304,7 @@ class ToolRAGIndex:
                         self._backend_state = None
                     return
             except Exception:
-                # 任意异常都走重建
+                # Any exception will trigger rebuild
                 pass
  
         self.build()
@@ -314,14 +314,14 @@ class ToolRAGIndex:
         texts = [build_embedding_text(it) for it in self.items]
         backend_type, backend_state, emb = self.embedder.embed_corpus(texts)
  
-        # 保存 items（只保存 dict，避免 dataclass 版本差异）
+        # save items（save dict only，avoid dataclass version differences）
         items_payload = [it.to_dict() for it in self.items]
         p["items"].write_text(json.dumps(items_payload, ensure_ascii=False, indent=2), "utf-8")
  
-        # 保存 embeddings
+        # save embeddings
         np.savez_compressed(str(p["emb"]), emb=emb.astype(np.float32))
  
-        # 保存 backend state
+        # save backend state
         if backend_type == "tfidf":
             import pickle
             p["tfidf"].write_bytes(pickle.dumps(backend_state))
@@ -355,7 +355,7 @@ class ToolRAGIndex:
         qv = self.embedder.embed_query(query, self._backend_type, self._backend_state)
         qv = qv.astype(np.float32)
  
-        # cosine: 因为我们存储时已归一化（hf）/或 tfidf 做过归一化
+        # cosine: normalized during storage (hf) / or tfidf has been normalized already
         scores = self._embeddings @ qv
         k = max(1, min(int(top_k), len(self._tool_ids)))
         idx = np.argpartition(-scores, k - 1)[:k]
@@ -371,7 +371,7 @@ class ToolRAGIndex:
     
     def close(self) -> None:
         """
-        释放rag 占用的内存资源
+        release the memory resources occupied by rag
         """
         self._embeddings = None
         self._tool_ids = None
