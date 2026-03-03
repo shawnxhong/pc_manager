@@ -80,6 +80,10 @@ class AgentGradio:
 
     def build_demo(self, concurrency_limit: int = 10):
         llm_choices = getattr(self.pipeline, "llm_choices", []) or []
+        for i in range(len(llm_choices)):
+            tmp = llm_choices[i].split("/")[-1]
+            llm_choices[i] = tmp if tmp else llm_choices[i]
+            
         default_llm = llm_choices[0] if llm_choices else None
         asr_enabled = bool(getattr(self.pipeline, "asr_runner", None))
         dump_dir = BASE_DIR / "chat_dumps"
@@ -145,6 +149,7 @@ class AgentGradio:
                     interactive=True,
                     scale=1,
                 )
+                print("hahahhaahhaah", llm_choices, default_llm)
                 device = gr.Dropdown(
                     label="Device",
                     choices=["CPU", "GPU"],

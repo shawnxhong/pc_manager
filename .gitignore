@@ -2,3 +2,4 @@ cache_dir
 __pycache__
 .pc_manager_cache
 *.whl
+.pc_manager_index
